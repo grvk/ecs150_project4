@@ -219,11 +219,11 @@ extern "C"
     std::vector<std::string> path;
     std::vector<unsigned int> fat;
 
-    static unsigned long little_endian(void *ptr, int count);
-
   public:
     bool init(const char *mount_name);
     void current_working_directory(char *abs_path);
+
+    static unsigned long little_endian(void *ptr, int count);
   };
 
   unsigned long FAT::little_endian(void *ptr, int count)
@@ -240,6 +240,7 @@ extern "C"
 
   void print_root_dir_line(char* str)
   {
+    char ATTR_READ_WRITE = 0x00;
     char ATTR_READ_ONLY = 0x01;
     char ATTR_HIDDEN = 0x02;
     char ATTR_SYSTEM = 0x04;
@@ -248,27 +249,72 @@ extern "C"
     char ATTR_ARCHIVE = 0x20;
     char ATTR_LONG_NAME = ATTR_READ_ONLY | ATTR_HIDDEN | ATTR_SYSTEM | ATTR_VOLUME_ID;
 
-
+    // bytes 0-10
     char short_name[12];
     short_name[11] = '\0';
+    for (int i = 0; i < 11; i++)
+    {
+      short_name[i] = *(str + i);
+    }
 
+    // byte 11
+    char dir_attr = *(str + 11);
+    bool valid_dir_attr = dir_attr == ATTR_READ_WRITE;
+    valid_dir_attr = valid_dir_attr || dir_attr == ATTR_READ_ONLY;
+    valid_dir_attr = valid_dir_attr || dir_attr == ATTR_HIDDEN;
+    valid_dir_attr = valid_dir_attr || dir_attr == ATTR_SYSTEM;
+    valid_dir_attr = valid_dir_attr || dir_attr == ATTR_VOLUME_ID;
+    valid_dir_attr = valid_dir_attr || dir_attr == ATTR_DIRECTORY;
+    valid_dir_attr = valid_dir_attr || dir_attr == ATTR_ARCHIVE;
+    valid_dir_attr = valid_dir_attr || dir_attr == ATTR_LONG_NAME;
 
-    if (((int) str[11]) == long_fname)
+    if ((!valid_dir_attr) || (dir_attr == ATTR_LONG_NAME))
     {
       return;
     }
+    std::string attr_label = dir_attr == ATTR_READ_WRITE ? "READ WRITE" :
+      dir_attr == ATTR_READ_ONLY ? "READ ONLY" :
+      dir_attr == ATTR_HIDDEN ? "HIDDEN" :
+      dir_attr == ATTR_SYSTEM ? "SYSTEM" :
+      dir_attr == ATTR_VOLUME_ID ? "VOLUME ID" :
+      dir_attr == ATTR_DIRECTORY ? "DIRECTORY" :
+      dir_attr == ATTR_ARCHIVE ? "ARCHIVE" : "LONG NAME";
 
-    // printing name
-    std::cout << "[SHORT NAME] ";
-    for (int i = 0; i < 11; i++)
-    {
-      std::cout << str[i];
-    }
-    std::cout << "\n";
+    // byte 12 - supposed to be 0
+    char unused_ntr = *(str + 12);
+    // byte 13
+    int time_wtf = *(str + 13);
+    // bytes 14, 15
+    int creation_time = FAT::little_endian(str + 14, 2);
+    // bytes 16, 17
+    int creation_date = FAT::little_endian(str + 16, 2);
+    // bytes 18, 19
+    int last_access_date = FAT::little_endian(str + 18, 2);
+    // bytes 20, 21 - supposed to be 0
+    int unused_high_bits_clus_num = FAT::little_endian(str + 20, 2);
+    // bytes 22, 23
+    int last_write_time = FAT::little_endian(str + 22, 2);
+    // bytes 24, 25
+    int last_write_date = FAT::little_endian(str + 24, 2);
+    // bytes 26, 27
+    int first_cluster_number = FAT::little_endian(str + 26, 2);
+    // bytes 28, 29, 30, 31
+    unsigned long size = FAT::little_endian(str + 28, 4);
 
-    // attr
-    std::cout << "[Attr] 0x" << std::hex << int(str[11]) << "\n";
-    std::cout << "[NTR] 0x" << std::hex << int(str[12]) << "\n";
+    std::cout << "--------------------------------------\n";
+
+    std::cout << "Name: " << short_name << "\n";
+    std::cout << "Attributes: " << attr_label << "\n";
+    std::cout << "Unused ntr: " << unused_ntr << "\n";
+    std::cout << "Time wtf: " << time_wtf << "\n";
+    std::cout << "Creation time: " << creation_time << "\n";
+    std::cout << "Creation date: " << creation_date << "\n";
+    std::cout << "Last Access Date: " << last_access_date << "\n";
+    std::cout << "Unused high bits: " << unused_high_bits_clus_num << "\n";
+    std::cout << "Last write time: " << last_write_time << "\n";
+    std::cout << "Last write date: " << last_write_date << "\n";
+    std::cout << "First cluster name: " << first_cluster_number << "\n";
+    std::cout << "Size: " << size << "\n";
   }
 
   bool FAT::init(const char *mount_name)
