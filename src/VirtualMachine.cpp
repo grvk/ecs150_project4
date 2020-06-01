@@ -6,9 +6,9 @@
 #include <map>
 #include <cstring>
 #include <string>
+#include <fcntl.h>
 #include "VirtualMachine.h"
 #include "Machine.h"
-
 #include <iostream>
 
 
@@ -16,6 +16,12 @@ extern "C"
 {
   TVMMainEntry VMLoadModule(const char *module);
   void VMUnloadModule();
+
+  TVMStatus OG_VMFileOpen(TMachineSignalStateRef mask, const char *filename, int flags, int mode, int *filedescriptor);
+  TVMStatus OG_VMFileClose(TMachineSignalStateRef mask, int filedescriptor);
+  TVMStatus OG_VMFileRead(TMachineSignalStateRef mask, int filedescriptor, void *data, int *length);
+  TVMStatus OG_VMFileWrite(TMachineSignalStateRef mask, int filedescriptor, void *data, int *length);
+  TVMStatus OG_VMFileSeek(TMachineSignalStateRef mask, int filedescriptor, int offset, int whence, int *newoffset);
 
   struct SkeletonArgs
   {
@@ -155,8 +161,6 @@ extern "C"
   };
 
 
-
-
   class MemoryManager
   {
     TVMMutexID mem_alloc_lock_id;
@@ -189,6 +193,313 @@ extern "C"
     }
   };
 
+  // @TODO: MANAGE BACKUP
+  class FAT
+  {
+    int mount_fd = -1;
+    const char *mount_name = NULL;
+
+    unsigned long bytes_per_sector; // BPB_BytsPerSec
+    unsigned long sectors_per_cluster; // BPB_SecPerClus
+    unsigned long fats_count; // BPB_NumFATs
+    unsigned long root_entries_count; // BPB_RootEntCnt
+    unsigned long total_sectors_count; // BPB_TotSec16 or BPB_TotSec32
+    unsigned long media_value; // BPB_Media
+    unsigned long eof_value; // 0xff <media_value>
+    unsigned long sectors_per_fat; // BPB_FATSz16
+    unsigned long volume_serial_number; // BS_VolID
+    unsigned long reserved_sectors_count; // BPB_RsvdSecCnt
+    unsigned long all_fats_sectors_count;
+    unsigned long root_dir_sectors_count;
+    unsigned long fat_offset;
+    unsigned long root_dir_offset;
+
+    char volume_label[12]; // @TODO: unsigned char? 11?
+
+    std::vector<std::string> path;
+    std::vector<unsigned int> fat;
+
+    static unsigned long little_endian(void *ptr, int count);
+
+  public:
+    bool init(const char *mount_name);
+    void current_working_directory(char *abs_path);
+  };
+
+  unsigned long FAT::little_endian(void *ptr, int count)
+  {
+    unsigned char* ch_ptr = (unsigned char*) ptr;
+    unsigned long res = 0;
+    for (int i = count - 1; i >= 0; i--)
+    {
+      res = (res << 8) + *(ch_ptr + i);
+    }
+
+    return res;
+  }
+
+  void print_root_dir_line(char* str)
+  {
+    char ATTR_READ_ONLY = 0x01;
+    char ATTR_HIDDEN = 0x02;
+    char ATTR_SYSTEM = 0x04;
+    char ATTR_VOLUME_ID = 0x08;
+    char ATTR_DIRECTORY = 0x10;
+    char ATTR_ARCHIVE = 0x20;
+    char ATTR_LONG_NAME = ATTR_READ_ONLY | ATTR_HIDDEN | ATTR_SYSTEM | ATTR_VOLUME_ID;
+
+
+    char short_name[12];
+    short_name[11] = '\0';
+
+
+    if (((int) str[11]) == long_fname)
+    {
+      return;
+    }
+
+    // printing name
+    std::cout << "[SHORT NAME] ";
+    for (int i = 0; i < 11; i++)
+    {
+      std::cout << str[i];
+    }
+    std::cout << "\n";
+
+    // attr
+    std::cout << "[Attr] 0x" << std::hex << int(str[11]) << "\n";
+    std::cout << "[NTR] 0x" << std::hex << int(str[12]) << "\n";
+  }
+
+  bool FAT::init(const char *mount_name)
+  {
+    TMachineSignalState mask;
+    MachineSuspendSignals(&mask);
+    OG_VMFileOpen(&mask, mount_name, O_RDWR, 600, &mount_fd);
+    MachineSuspendSignals(&mask);
+
+    if (mount_fd < 0)
+    {
+      MachineResumeSignals(&mask);
+      return false;
+    }
+
+    volatile int data_len = 512;
+    volatile unsigned char data[data_len];
+
+    void *data_ptr = (void*) &data;
+    int *data_len_ptr = (int*) &data_len;
+
+    TVMStatus res = OG_VMFileRead(&mask, mount_fd, data_ptr, data_len_ptr);
+    MachineSuspendSignals(&mask);
+
+    if (res != VM_STATUS_SUCCESS)
+    {
+      MachineResumeSignals(&mask);
+      return false;
+    }
+
+    // assert is FAT
+    if ((data[510] != 0x55) || (data[511] != 0xAA))
+    {
+      VMPrintError(
+        "Improperly formated FAT volume. \
+        According to FAT specs, values of volume[510] and volume[511] must \
+        be 0x55 and 0xAA. Mismatch. Not a FAT volume provided\n");
+      MachineResumeSignals(&mask);
+      return false;
+    }
+
+    bytes_per_sector = FAT::little_endian(data_ptr + 11, 2);
+    sectors_per_cluster = data[13];
+    reserved_sectors_count = FAT::little_endian(data_ptr + 14, 2);
+    fats_count = data[16];
+    root_entries_count = FAT::little_endian(data_ptr + 17, 2);
+
+    unsigned long total_sec_16 = FAT::little_endian(data_ptr + 19, 2);
+    unsigned long total_sec_32 = FAT::little_endian(data_ptr + 32, 4);
+    if ((total_sec_16 == 0) && (total_sec_32 == 0))
+    {
+      VMPrintError(
+        "Improperly formated FAT volume.\
+        Both BPB_TotSec32 or BPB_TotSec16 are 0. \
+        Exactly one must have positive value.\n");
+      MachineResumeSignals(&mask);
+      return false;
+    }
+    else if ((total_sec_16 != 0) && (total_sec_32 != 0))
+    {
+      VMPrintError(
+        "Improperly formated FAT volume. \
+        Both BPB_TotSec32 or BPB_TotSec16 are not 0. \
+        Exactly one must have positive value.\n");
+      MachineResumeSignals(&mask);
+      return false;
+    }
+    else if (total_sec_16 != 0)
+    {
+      total_sectors_count = total_sec_16;
+    }
+    else
+    {
+      total_sectors_count = total_sec_32;
+    }
+
+    media_value = data[21];
+    eof_value = (0xff << 8) + media_value;
+    sectors_per_fat = FAT::little_endian(data_ptr + 22, 2);
+    volume_serial_number = FAT::little_endian(data_ptr + 39, 4);
+    for (int i = 0; i < 11; i++)
+    {
+      volume_label[i] = data[43 + i];
+    }
+    volume_label[11] = '\0';
+
+
+    // reserved_sectors_count
+    all_fats_sectors_count = sectors_per_fat * fats_count;
+    root_dir_sectors_count =
+      ((root_entries_count * 32) + (bytes_per_sector - 1)) / bytes_per_sector;
+
+    fat_offset = reserved_sectors_count * bytes_per_sector;
+    root_dir_offset =
+      (reserved_sectors_count + all_fats_sectors_count) * bytes_per_sector;
+
+    std::cout << ">> bytes_per_sector = " << bytes_per_sector << "\n";
+    std::cout << ">> sectors_per_cluster = " << sectors_per_cluster << "\n";
+    std::cout << ">> fats_count = " << fats_count << "\n";
+    std::cout << ">> root_entries_count = " << root_entries_count << "\n";
+    std::cout << ">> media_value = " << media_value << "\n";
+    std::cout << ">> sectors_per_fat = " << sectors_per_fat << "\n";
+    std::cout << ">> volume_serial_number = " << volume_serial_number << "\n";
+    std::cout << ">> volume_label = " << volume_label << "\n";
+    std::cout << ">> reserved_sectors_count = " << reserved_sectors_count << "\n";
+    std::cout << ">> all_fats_sectors_count = " << all_fats_sectors_count << "\n";
+    std::cout << ">> root_dir_sectors_count = " << root_dir_sectors_count << "\n";
+    std::cout << ">> fat_offset = " << fat_offset << "\n";
+    std::cout << ">> root_dir_offset = " << root_dir_offset << "\n";
+    std::cout << ">> eof_value = " << eof_value << "\n";
+
+
+    // read FAT table
+    // increase capacity:
+    // - num of sectors in 1 fat * bytes per sector / bytes per entry
+    int fat_size = sectors_per_fat * bytes_per_sector / 2;
+    fat.reserve(fat_size);
+
+    // go to the beginning of fat
+    int tmp = -1;
+    res = OG_VMFileSeek(&mask, mount_fd, fat_offset, 0, &tmp);
+    MachineSuspendSignals(&mask);
+    if (res != VM_STATUS_SUCCESS)
+    {
+      MachineResumeSignals(&mask);
+      return false;
+    }
+
+    volatile int fat_data_len = sectors_per_fat * bytes_per_sector;
+    volatile unsigned char fat_data[fat_data_len];
+    void *fat_data_ptr = (void*) &fat_data;
+    int *fat_data_len_ptr = (int*) &fat_data_len;
+
+    res = OG_VMFileRead(&mask, mount_fd, fat_data_ptr, fat_data_len_ptr);
+    MachineSuspendSignals(&mask);
+
+    if (res != VM_STATUS_SUCCESS)
+    {
+      MachineResumeSignals(&mask);
+      return false;
+    }
+    for (int i = 0; i < fat_size; i++)
+    {
+      fat[i] = FAT::little_endian(fat_data_ptr + 2 * i, 2);
+    }
+    // assert 0xfff8 0xffff
+    if ((fat[0] != eof_value) || (fat[1] != 65535))
+    {
+      VMPrintError(
+        "Improperly formated FAT volume. \
+        First values in fat table are expected to be 0xff<BPB_Media> and 0xffff\n");
+      MachineResumeSignals(&mask);
+      return false;
+    }
+
+    // READ ROOT DIR
+    // FIGURE OUT CORRELATION BETWEEN ROOT DIR and FAT
+
+
+
+
+
+    // go to the beginning of root dir
+    tmp = -1;
+    res = OG_VMFileSeek(&mask, mount_fd, root_dir_offset, 0, &tmp);
+    MachineSuspendSignals(&mask);
+    if (res != VM_STATUS_SUCCESS)
+    {
+      MachineResumeSignals(&mask);
+      return false;
+    }
+
+    volatile int root_dir_data_len = root_dir_sectors_count * bytes_per_sector;
+    volatile unsigned char root_dir_data[root_dir_data_len];
+    void *root_dir_data_ptr = (void*) &root_dir_data;
+    int *root_dir_data_len_ptr = (int*) &root_dir_data_len;
+
+    res = OG_VMFileRead(&mask, mount_fd, root_dir_data_ptr, root_dir_data_len_ptr);
+    MachineSuspendSignals(&mask);
+
+    if (res != VM_STATUS_SUCCESS)
+    {
+      MachineResumeSignals(&mask);
+      return false;
+    }
+
+    int i = 0;
+    while (true)
+    {
+      if ((root_dir_data[i] == 0x00) || (root_dir_data[i] == 0xE5))
+      {
+        break;
+      }
+      char tmp_str[32];
+
+      for (int j = 0; j < 32; j++)
+      {
+        tmp_str[j] = root_dir_data[i + j];
+      }
+
+      print_root_dir_line(tmp_str);
+      i += 32;
+
+    }
+
+    MachineResumeSignals(&mask);
+    return true;
+  }
+
+  // @TODO: handle long paths; to test
+  void FAT::current_working_directory(char *abs_path)
+  {
+    abs_path[0] = '/';
+    int size = path.size();
+    int char_i = 1;
+
+    if (size > 0)
+    {
+      // iterate over each dir
+      for (int path_i = 0; path_i < size; path_i++)
+      {
+        // iterate over each char in the dir
+        for (int j = 0; j < path[path_i].length(); j++, char_i++)
+        {
+          abs_path[char_i] = path[path_i][j];
+        }
+      }
+    }
+    abs_path[char_i] = '\0';
+  }
+
   class GlobalState
   {
   public:
@@ -202,6 +513,7 @@ extern "C"
 
     int tick_ms = 0;
     TVMTick current_time = 0;
+    FAT fat;
 
     ~GlobalState()
     {
@@ -211,7 +523,6 @@ extern "C"
       }
     }
   } global_state;
-
 
   void Skeleton(void* args)
   {
@@ -448,10 +759,10 @@ extern "C"
   }
 
   // +
-  TVMStatus VMStart(int tickms, TVMMemorySize sharedsize, int argc, char *argv[])
+  TVMStatus VMStart(int tickms, TVMMemorySize sharedsize, const char *mount, int argc, char *argv[])
   {
     TVMMainEntry fnEntry = VMLoadModule(argv[0]);
-    if (fnEntry == NULL)
+    if ((fnEntry == NULL) || (mount == NULL))
     {
       return VM_STATUS_FAILURE;
     }
@@ -473,6 +784,11 @@ extern "C"
 
     create_main_thread();
     create_idle_thread();
+
+    if (!global_state.fat.init(mount))
+    {
+      return VM_STATUS_FAILURE;
+    }
 
     fnEntry(argc, argv);
 
@@ -734,317 +1050,36 @@ extern "C"
     return VM_STATUS_SUCCESS;
   }
 
-  struct FileArg
-  {
-    int result = 0;
-    TVMThreadID thread_id = TCB::INVALID_ID;
-  };
 
 
-  void FileCB(void* arg, int result)
-  {
 
-    TMachineSignalState signal_mask_state;
-    MachineSuspendSignals(&signal_mask_state);
 
-    FileArg* arg_ptr = static_cast<FileArg*>(arg);
-    arg_ptr -> result = result;
 
-    if (arg_ptr -> thread_id != TCB::INVALID_ID)
-    {
-      TCB* thread_ptr = global_state.all_threads[arg_ptr -> thread_id];
 
-      if ((thread_ptr != NULL) && (thread_ptr -> thread_state ==
-        VM_THREAD_STATE_WAITING))
-      {
 
-        thread_ptr -> enable_time = 0;
-        thread_ptr -> thread_state = VM_THREAD_STATE_READY;
-        global_state.ready_list.push(thread_ptr);
-      }
-    }
 
-    MachineResumeSignals(&signal_mask_state);
-  }
 
-  TVMStatus VMFileOpen(const char *filename, int flags, int mode, int *filedescriptor)
-  {
-    TMachineSignalState signal_mask_state;
-    MachineSuspendSignals(&signal_mask_state);
-    if (filename == NULL || filedescriptor == NULL)
-    {
-      MachineResumeSignals(&signal_mask_state);
-      return VM_STATUS_ERROR_INVALID_PARAMETER;
-    }
 
-    TCB* cur_th_ptr = global_state.cur_thread_ptr;
-    cur_th_ptr -> thread_state = VM_THREAD_STATE_WAITING;
 
-    unsigned int end_of_time = 0;
-    end_of_time -= 1;
 
-    cur_th_ptr -> enable_time = end_of_time;
 
-    volatile FileArg arg;
-    arg.thread_id = cur_th_ptr -> get_thread_id();
-    void *arg_ptr = (void*) (&arg);
 
-    MachineFileOpen(filename, flags, mode, FileCB, arg_ptr);
 
-    schedule_threads(&signal_mask_state);
 
-    if (arg.result < 0)
-    {
-      return VM_STATUS_FAILURE;
-    }
 
-    *filedescriptor = arg.result;
 
-    return VM_STATUS_SUCCESS;
-  }
 
-  TVMStatus VMFileClose(int filedescriptor)
-  {
-    TMachineSignalState signal_mask_state;
-    MachineSuspendSignals(&signal_mask_state);
 
-    TCB* cur_th_ptr = global_state.cur_thread_ptr;
-    cur_th_ptr -> thread_state = VM_THREAD_STATE_WAITING;
 
-    unsigned int end_of_time = 0;
-    end_of_time -= 1;
 
-    cur_th_ptr -> enable_time = end_of_time;
 
-    volatile FileArg arg;
-    arg.thread_id = cur_th_ptr -> get_thread_id();
-    void *arg_ptr = (void*) (&arg);
 
-    MachineFileClose(filedescriptor, FileCB, arg_ptr);
 
-    schedule_threads(&signal_mask_state);
 
 
-    if (arg.result < 0)
-    {
-      return VM_STATUS_FAILURE;
-    }
 
-    return VM_STATUS_SUCCESS;
-  }
 
-  TVMStatus VMFileRead(int filedescriptor, void *data, int *length)
-  {
-    TMachineSignalState signal_mask_state;
-    TMachineSignalState* mask = &signal_mask_state;
-    MachineSuspendSignals(mask);
-    TMachineSignalState** mask_ptr = &mask;
-
-    if (data == NULL || length == NULL)
-    {
-      MachineResumeSignals(mask);
-      return VM_STATUS_ERROR_INVALID_PARAMETER;
-    }
-
-    int expected_total_bytes = *length;
-    int bytes_read_total = 0;
-    bool is_failure = false;
-    bool is_last_read = false;
-    char* char_data = static_cast<char*>(data);
-
-    do
-    {
-      TCB* cur_th_ptr = global_state.cur_thread_ptr;
-      cur_th_ptr -> thread_state = VM_THREAD_STATE_WAITING;
-
-      unsigned int end_of_time = 0;
-      end_of_time -= 1;
-
-      cur_th_ptr -> enable_time = end_of_time;
 
-      FileArg arg;
-      void *arg_ptr = &arg;
-
-      arg.thread_id = cur_th_ptr -> get_thread_id();
-
-      int mem_cell_id = -1;
-      char *address_ptr = NULL;
-
-      global_state.mem_mgr_ptr -> allocate_cell(&mem_cell_id, &address_ptr, mask_ptr);
-
-      int num_of_bytes_to_read = expected_total_bytes - bytes_read_total;
-      if (num_of_bytes_to_read > 512)
-      {
-        num_of_bytes_to_read = 512;
-      }
-      else
-      {
-        is_last_read = true;
-      }
-
-      MachineFileRead(filedescriptor, address_ptr, num_of_bytes_to_read, FileCB, arg_ptr);
-      schedule_threads(mask);
-
-      MachineSuspendSignals(mask);
-
-      global_state.mem_mgr_ptr -> free_memory_cell(mem_cell_id);
-
-
-      if (arg.result < 0)
-      {
-        is_failure = true;
-      }
-      else
-      {
-        std::memcpy(char_data + bytes_read_total, address_ptr, arg.result);
-        bytes_read_total += arg.result;
-
-        if (arg.result < num_of_bytes_to_read)
-        {
-          is_last_read = true;
-        }
-      }
-
-
-    }
-    while(!is_last_read && !is_failure);
-
-    *length = bytes_read_total;
-
-    if (is_failure)
-    {
-      MachineResumeSignals(mask);
-      return VM_STATUS_FAILURE;
-    }
-
-    MachineResumeSignals(mask);
-    return VM_STATUS_SUCCESS;
-  }
-
-
-  TVMStatus VMFileWrite(int filedescriptor, void *data, int *length)
-  {
-    TMachineSignalState signal_mask_state;
-    TMachineSignalState* mask = &signal_mask_state;
-    MachineSuspendSignals(mask);
-    TMachineSignalState** mask_ptr = &mask;
-
-    if (data == NULL || length == NULL)
-    {
-      MachineResumeSignals(mask);
-      return VM_STATUS_ERROR_INVALID_PARAMETER;
-    }
-
-    int expected_total_bytes = *length;
-    int bytes_written_total = 0;
-    bool is_failure = false;
-    bool is_last_write = false;
-    char* char_data = static_cast<char*>(data);
-
-    do
-    {
-      // Waiting
-      TCB* cur_th_ptr = global_state.cur_thread_ptr;
-      cur_th_ptr -> thread_state = VM_THREAD_STATE_WAITING;
-
-      unsigned int end_of_time = 0;
-      end_of_time -= 1;
-
-      cur_th_ptr -> enable_time = end_of_time;
-
-      FileArg arg;
-      void *arg_ptr = &arg;
-
-      arg.thread_id = cur_th_ptr -> get_thread_id();
-
-      int mem_cell_id = -1;
-      char *address_ptr = NULL;
-      char *data_offset = char_data + bytes_written_total;
-
-      global_state.mem_mgr_ptr -> allocate_cell(&mem_cell_id, &address_ptr, mask_ptr);
-
-      int num_of_bytes_to_write = expected_total_bytes - bytes_written_total;
-      if (num_of_bytes_to_write > 512)
-      {
-        num_of_bytes_to_write = 512;
-      }
-      else
-      {
-        is_last_write = true;
-      }
-
-      std::memcpy(address_ptr, static_cast<void*>(data_offset), num_of_bytes_to_write);
-
-      MachineFileWrite(
-        filedescriptor, address_ptr, num_of_bytes_to_write, FileCB, arg_ptr);
-
-      schedule_threads(mask);
-
-      MachineSuspendSignals(mask);
-
-      global_state.mem_mgr_ptr -> free_memory_cell(mem_cell_id);
-
-      if (arg.result < 0)
-      {
-        is_failure = true;
-      }
-      else
-      {
-        bytes_written_total += arg.result;
-
-        if (arg.result < num_of_bytes_to_write)
-        {
-          is_last_write = true;
-        }
-      }
-    }
-    while(!is_last_write && !is_failure);
-
-    *length = bytes_written_total;
-
-    if (is_failure)
-    {
-      MachineResumeSignals(mask);
-      return VM_STATUS_FAILURE;
-    }
-
-    MachineResumeSignals(mask);
-    return VM_STATUS_SUCCESS;
-  }
-
-  TVMStatus VMFileSeek(int filedescriptor, int offset, int whence, int *newoffset)
-  {
-    TMachineSignalState signal_mask_state;
-    MachineSuspendSignals(&signal_mask_state);
-
-    TCB* cur_th_ptr = global_state.cur_thread_ptr;
-    cur_th_ptr -> thread_state = VM_THREAD_STATE_WAITING;
-
-    unsigned int end_of_time = 0;
-    end_of_time -= 1;
-
-    cur_th_ptr -> enable_time = end_of_time;
-
-    volatile FileArg arg;
-    arg.thread_id = cur_th_ptr -> get_thread_id();
-    void *arg_ptr = (void*) (&arg);
-
-    MachineFileSeek(filedescriptor, offset, whence, FileCB, arg_ptr);
-
-    schedule_threads(&signal_mask_state);
-
-    if (arg.result < 0)
-    {
-      return VM_STATUS_FAILURE;
-    }
-
-    if (newoffset != NULL)
-    {
-      *newoffset = arg.result;
-    }
-
-    return VM_STATUS_SUCCESS;
-  }
 
 
   Lock::Lock()
@@ -1312,4 +1347,360 @@ extern "C"
     return VM_STATUS_SUCCESS;
   }
 
+
+
+
+
+
+
+
+
+  // -+
+  TVMStatus VMFileRead(int filedescriptor, void *data, int *length)
+  {
+    TMachineSignalState signal_mask_state;
+    MachineSuspendSignals(&signal_mask_state);
+
+    if ((filedescriptor >= 0) && (filedescriptor <= 2))
+    {
+      return OG_VMFileRead(&signal_mask_state, filedescriptor, data, length);
+    }
+
+    MachineResumeSignals(&signal_mask_state);
+    return VM_STATUS_FAILURE;
+  }
+
+  // -+
+  TVMStatus VMFileWrite(int filedescriptor, void *data, int *length)
+  {
+    TMachineSignalState signal_mask_state;
+    MachineSuspendSignals(&signal_mask_state);
+
+    if ((filedescriptor >= 0) && (filedescriptor <= 2))
+    {
+      return OG_VMFileWrite(&signal_mask_state, filedescriptor, data, length);
+    }
+
+    std::cout << ">> [VMFileWrite] Error. File Descriptor: " << filedescriptor << "\n";
+
+    MachineResumeSignals(&signal_mask_state);
+    return VM_STATUS_FAILURE;
+  }
+
+
+
+
+
+
+  // +
+  struct OG_FileArg
+  {
+    int result = 0;
+    TVMThreadID thread_id = TCB::INVALID_ID;
+  };
+
+  // +
+  void OG_FileCB(void* arg, int result)
+  {
+
+    TMachineSignalState signal_mask_state;
+    MachineSuspendSignals(&signal_mask_state);
+
+    OG_FileArg* arg_ptr = static_cast<OG_FileArg*>(arg);
+    arg_ptr -> result = result;
+
+    if (arg_ptr -> thread_id != TCB::INVALID_ID)
+    {
+      TCB* thread_ptr = global_state.all_threads[arg_ptr -> thread_id];
+
+      if ((thread_ptr != NULL) && (thread_ptr -> thread_state ==
+        VM_THREAD_STATE_WAITING))
+      {
+
+        thread_ptr -> enable_time = 0;
+        thread_ptr -> thread_state = VM_THREAD_STATE_READY;
+        global_state.ready_list.push(thread_ptr);
+      }
+    }
+
+    MachineResumeSignals(&signal_mask_state);
+  }
+
+  // +
+  TVMStatus OG_VMFileOpen(TMachineSignalStateRef mask, const char *filename, int flags, int mode, int *filedescriptor)
+  {
+    if (filename == NULL || filedescriptor == NULL)
+    {
+      MachineResumeSignals(mask);
+      return VM_STATUS_ERROR_INVALID_PARAMETER;
+    }
+
+    TCB* cur_th_ptr = global_state.cur_thread_ptr;
+    cur_th_ptr -> thread_state = VM_THREAD_STATE_WAITING;
+
+    volatile OG_FileArg arg;
+    arg.thread_id = cur_th_ptr -> get_thread_id();
+    void *arg_ptr = (void*) (&arg);
+
+    MachineFileOpen(filename, flags, mode, OG_FileCB, arg_ptr);
+    schedule_threads(mask);
+
+    if (arg.result < 0)
+    {
+      return VM_STATUS_FAILURE;
+    }
+
+    *filedescriptor = arg.result;
+
+    return VM_STATUS_SUCCESS;
+
+  }
+
+  // +
+  TVMStatus OG_VMFileClose(TMachineSignalStateRef mask, int filedescriptor)
+  {
+    TCB* cur_th_ptr = global_state.cur_thread_ptr;
+    cur_th_ptr -> thread_state = VM_THREAD_STATE_WAITING;
+
+    volatile OG_FileArg arg;
+    arg.thread_id = cur_th_ptr -> get_thread_id();
+    void *arg_ptr = (void*) (&arg);
+
+    MachineFileClose(filedescriptor, OG_FileCB, arg_ptr);
+    schedule_threads(mask);
+
+    if (arg.result < 0)
+    {
+      return VM_STATUS_FAILURE;
+    }
+
+    return VM_STATUS_SUCCESS;
+  }
+
+  // +
+  TVMStatus OG_VMFileRead(TMachineSignalStateRef mask, int filedescriptor, void *data, int *length)
+  {
+    TMachineSignalState** mask_ptr = &mask;
+
+    if (data == NULL || length == NULL)
+    {
+      MachineResumeSignals(mask);
+      return VM_STATUS_ERROR_INVALID_PARAMETER;
+    }
+
+    int expected_total_bytes = *length;
+    int bytes_read_total = 0;
+    bool is_failure = false;
+    bool is_last_read = false;
+    char* char_data = static_cast<char*>(data);
+
+    do
+    {
+      TCB* cur_th_ptr = global_state.cur_thread_ptr;
+      cur_th_ptr -> thread_state = VM_THREAD_STATE_WAITING;
+
+      volatile OG_FileArg arg;
+      void *arg_ptr = (void*) &arg;
+
+      arg.thread_id = cur_th_ptr -> get_thread_id();
+
+      int mem_cell_id = -1;
+      char *address_ptr = NULL;
+
+      global_state.mem_mgr_ptr -> allocate_cell(&mem_cell_id, &address_ptr, mask_ptr);
+
+      int num_of_bytes_to_read = expected_total_bytes - bytes_read_total;
+      if (num_of_bytes_to_read > 512)
+      {
+        num_of_bytes_to_read = 512;
+      }
+      else
+      {
+        is_last_read = true;
+      }
+
+      MachineFileRead(filedescriptor, address_ptr, num_of_bytes_to_read, OG_FileCB, arg_ptr);
+      schedule_threads(mask);
+
+      MachineSuspendSignals(mask);
+
+      global_state.mem_mgr_ptr -> free_memory_cell(mem_cell_id);
+
+
+      if (arg.result < 0)
+      {
+        is_failure = true;
+      }
+      else
+      {
+        std::memcpy(char_data + bytes_read_total, address_ptr, arg.result);
+        bytes_read_total += arg.result;
+
+        if (arg.result < num_of_bytes_to_read)
+        {
+          is_last_read = true;
+        }
+      }
+
+
+    }
+    while(!is_last_read && !is_failure);
+
+    *length = bytes_read_total;
+
+    if (is_failure)
+    {
+      MachineResumeSignals(mask);
+      return VM_STATUS_FAILURE;
+    }
+
+    MachineResumeSignals(mask);
+    return VM_STATUS_SUCCESS;
+  }
+
+  // +
+  TVMStatus OG_VMFileWrite(TMachineSignalStateRef mask, int filedescriptor, void *data, int *length)
+  {
+    TMachineSignalState** mask_ptr = &mask;
+
+    if (data == NULL || length == NULL)
+    {
+      MachineResumeSignals(mask);
+      return VM_STATUS_ERROR_INVALID_PARAMETER;
+    }
+
+    int expected_total_bytes = *length;
+    int bytes_written_total = 0;
+    bool is_failure = false;
+    bool is_last_write = false;
+    char* char_data = static_cast<char*>(data);
+
+    do
+    {
+      // Waiting
+      TCB* cur_th_ptr = global_state.cur_thread_ptr;
+      cur_th_ptr -> thread_state = VM_THREAD_STATE_WAITING;
+
+      volatile OG_FileArg arg;
+      void *arg_ptr = (void*) &arg;
+
+      arg.thread_id = cur_th_ptr -> get_thread_id();
+
+      int mem_cell_id = -1;
+      char *address_ptr = NULL;
+      char *data_offset = char_data + bytes_written_total;
+
+      global_state.mem_mgr_ptr -> allocate_cell(&mem_cell_id, &address_ptr, mask_ptr);
+
+      int num_of_bytes_to_write = expected_total_bytes - bytes_written_total;
+      if (num_of_bytes_to_write > 512)
+      {
+        num_of_bytes_to_write = 512;
+      }
+      else
+      {
+        is_last_write = true;
+      }
+
+      std::memcpy(address_ptr, static_cast<void*>(data_offset), num_of_bytes_to_write);
+
+      MachineFileWrite(
+        filedescriptor, address_ptr, num_of_bytes_to_write, OG_FileCB, arg_ptr);
+
+      schedule_threads(mask);
+
+      MachineSuspendSignals(mask);
+
+      global_state.mem_mgr_ptr -> free_memory_cell(mem_cell_id);
+
+      if (arg.result < 0)
+      {
+        is_failure = true;
+      }
+      else
+      {
+        bytes_written_total += arg.result;
+
+        if (arg.result < num_of_bytes_to_write)
+        {
+          is_last_write = true;
+        }
+      }
+    }
+    while(!is_last_write && !is_failure);
+
+    *length = bytes_written_total;
+
+    if (is_failure)
+    {
+      MachineResumeSignals(mask);
+      return VM_STATUS_FAILURE;
+    }
+
+    MachineResumeSignals(mask);
+    return VM_STATUS_SUCCESS;
+  }
+
+  // +
+  TVMStatus OG_VMFileSeek(TMachineSignalStateRef mask, int filedescriptor, int offset, int whence, int *newoffset)
+  {
+
+    TCB* cur_th_ptr = global_state.cur_thread_ptr;
+    cur_th_ptr -> thread_state = VM_THREAD_STATE_WAITING;
+
+    volatile OG_FileArg arg;
+    arg.thread_id = cur_th_ptr -> get_thread_id();
+    void *arg_ptr = (void*) (&arg);
+
+    MachineFileSeek(filedescriptor, offset, whence, OG_FileCB, arg_ptr);
+    schedule_threads(mask);
+
+    if (arg.result < 0)
+    {
+      return VM_STATUS_FAILURE;
+    }
+
+    if (newoffset != NULL)
+    {
+      *newoffset = arg.result;
+    }
+
+    return VM_STATUS_SUCCESS;
+  }
+
+
+
+
+
+  TVMStatus VMDirectoryOpen(const char *dirname, int *dirdescriptor)
+  {
+    return VM_STATUS_FAILURE;
+  }
+
+
+  // +-
+  // @TODO: locks?
+  TVMStatus VMDirectoryCurrent(char *abspath)
+  {
+    TMachineSignalState signal_mask_state;
+    MachineSuspendSignals(&signal_mask_state);
+
+    if (abspath == NULL)
+    {
+      MachineResumeSignals(&signal_mask_state);
+      return VM_STATUS_ERROR_INVALID_PARAMETER;
+    }
+
+    global_state.fat.current_working_directory(abspath);
+    std::cout << "HERE\n";
+
+    MachineResumeSignals(&signal_mask_state);
+    return VM_STATUS_SUCCESS;
+  }
+
+  // -
+  TVMStatus VMDirectoryChange(const char *path)
+  {
+    return VM_STATUS_FAILURE;
+  }
 }
