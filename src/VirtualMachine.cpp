@@ -193,12 +193,48 @@ extern "C"
     }
   };
 
+  class DirItem
+  {
+    public:
+      std::string short_name;
+      std::string long_name;
+      unsigned char attribute;
+      unsigned char unused_ntr;
+
+      // @TODO: figure out what it is
+      unsigned int create_time_tenth;
+      unsigned int create_time;
+      unsigned int create_date;
+      unsigned int last_access_date;
+
+      unsigned int unused_cluster_bits;
+
+      unsigned int last_write_time;
+      unsigned int last_write_date;
+
+      unsigned int first_cluster_number;
+      unsigned long size;
+
+      static bool is_good_attribute(unsigned char attr)
+      {
+        return ((attr >> 6) == 0);
+      }
+  };
+
+
+  struct FdDescription
+  {
+  public:
+    int mount_vol_offset = -1;
+    int bytes_processed_total = 0;
+    int bytes_processed_this_cluster = 0;
+    int cur_cluster_num = -1;
+    DirItem *dir_item_ptr = NULL;
+  };
+
   // @TODO: MANAGE BACKUP
   class FAT
   {
-    int mount_fd = -1;
-    const char *mount_name = NULL;
-
     unsigned long bytes_per_sector; // BPB_BytsPerSec
     unsigned long sectors_per_cluster; // BPB_SecPerClus
     unsigned long fats_count; // BPB_NumFATs
@@ -209,22 +245,163 @@ extern "C"
     unsigned long sectors_per_fat; // BPB_FATSz16
     unsigned long volume_serial_number; // BS_VolID
     unsigned long reserved_sectors_count; // BPB_RsvdSecCnt
-    unsigned long all_fats_sectors_count;
     unsigned long root_dir_sectors_count;
-    unsigned long fat_offset;
-    unsigned long root_dir_offset;
 
     char volume_label[12]; // @TODO: unsigned char? 11?
 
+
+    bool add_files_dirs_to_cur_path(char* buffer, int len);
+
+    inline static int fd_count = 101;
+
+  public:
+    static const unsigned char ATTR_READ_WRITE = 0x00;
+    static const unsigned char ATTR_READ_ONLY = 0x01;
+    static const unsigned char ATTR_HIDDEN = 0x02;
+    static const unsigned char ATTR_SYSTEM = 0x04;
+    static const unsigned char ATTR_VOLUME_ID = 0x08;
+    static const unsigned char ATTR_DIRECTORY = 0x10;
+    static const unsigned char ATTR_ARCHIVE = 0x20;
+    static const unsigned char ATTR_LONG_NAME =
+      ATTR_READ_ONLY | ATTR_HIDDEN | ATTR_SYSTEM | ATTR_VOLUME_ID;
+
+    static unsigned long little_endian(void *ptr, int count);
+    static std::string produce_short_name(char* buf);
+
+    int mount_fd = -1;
+    const char *mount_name = NULL;
+    int current_dir_cluster_number;
+    std::map<std::string, DirItem> current_dir_items;
+    std::map<int, FdDescription> fds;
     std::vector<std::string> path;
     std::vector<unsigned int> fat;
 
-  public:
     bool init(const char *mount_name);
+    unsigned long get_first_sector_of_cluster(unsigned int n);
+    unsigned long get_offset_of_sector(unsigned long n);
     void current_working_directory(char *abs_path);
-
-    static unsigned long little_endian(void *ptr, int count);
+    int get_next_fd();
   };
+
+  int FAT::get_next_fd()
+  {
+    int fd = FAT::fd_count;
+    FAT::fd_count += 1;
+    return fd;
+  }
+
+  // expects 11 bytes
+  std::string FAT::produce_short_name(char* buf)
+  {
+    char short_name[13] = {
+      '\0', '\0', '\0', '\0', '\0', '\0',
+      '\0', '\0', '\0', '\0', '\0', '\0', '\0'};
+
+    int i = 0;
+    for (int j = 0; j < 8; j++)
+    {
+      if ((j == 0) && (buf[j] == 0x05))
+      {
+        short_name[i] = 0xE5;
+        i += 1;
+      }
+      else if (buf[j] != 0x20)
+      {
+        short_name[i] = buf[j];
+        i += 1;
+      }
+    }
+
+    if (buf[8] != 0x20)
+    {
+      short_name[i] = '.';
+      i += 1;
+    }
+
+    for (int j = 8; j < 11; j++)
+    {
+      if (buf[j] != 0x20)
+      {
+        short_name[i] = buf[j];
+        i += 1;
+      }
+    }
+
+    return std::string(short_name);
+  }
+
+
+  // std::cout << "--------------------------------------\n";
+  //
+  // std::cout << "Name: " << short_name << "\n";
+  // std::cout << "Attributes: " << attr_label << "\n";
+  // std::cout << "Unused ntr: " << unused_ntr << "\n";
+  // std::cout << "Time wtf: " << time_wtf << "\n";
+  // std::cout << "Creation time: " << creation_time << "\n";
+  // std::cout << "Creation date: " << creation_date << "\n";
+  // std::cout << "Last Access Date: " << last_access_date << "\n";
+  // std::cout << "Unused high bits: " << unused_high_bits_clus_num << "\n";
+  // std::cout << "Last write time: " << last_write_time << "\n";
+  // std::cout << "Last write date: " << last_write_date << "\n";
+  // std::cout << "First cluster name: " << first_cluster_number << "\n";
+  // std::cout << "Size: " << size << "\n";
+  bool FAT::add_files_dirs_to_cur_path(char* buffer, int len)
+  {
+    bool reached_end = false;
+
+    int LINE_LENGTH = 32; // 32 bytes
+
+    for (int i = 0; !reached_end && (i < len); i += LINE_LENGTH)
+    {
+      if (buffer[i] == 0x00)
+      {
+        reached_end = true;
+      }
+      else if (buffer[i] != 0xE5)
+      {
+        unsigned char attr = *(buffer + i + 11);
+
+        if (!DirItem::is_good_attribute(attr) || (attr == FAT::ATTR_LONG_NAME))
+        {
+          continue;
+        }
+
+        DirItem item;
+        // bytes 0-10
+
+        item.short_name = FAT::produce_short_name(buffer + i);
+
+        // byte 11
+        item.attribute = attr;
+        // byte 12
+        item.unused_ntr = *(buffer + i + 12);
+        // byte 13
+        item.create_time_tenth = *(buffer + i + 13);
+        // bytes 14, 15
+        item.create_time = FAT::little_endian(buffer + i + 14, 2);
+        // bytes 16, 17
+        item.create_date = FAT::little_endian(buffer + i + 16, 2);
+        // bytes 18, 19
+        item.last_access_date = FAT::little_endian(buffer + i + 18, 2);
+        // bytes 20, 21
+        item.unused_cluster_bits = FAT::little_endian(buffer + i + 20, 2);
+        // bytes 22, 23
+        item.last_write_time = FAT::little_endian(buffer + i + 22, 2);
+        // bytes 24, 25
+        item.last_write_date = FAT::little_endian(buffer + i + 24, 2);
+        // bytes 26, 27
+        item.first_cluster_number = FAT::little_endian(buffer + i + 26, 2);
+        // bytes 28, 29, 30, 31
+        item.size = FAT::little_endian(buffer + i + 28, 4);
+
+        current_dir_items[item.short_name] = item;
+        std::cout << ">> Adding '" << item.short_name << "'\n";
+      }
+    }
+
+
+    return reached_end;
+  }
 
   unsigned long FAT::little_endian(void *ptr, int count)
   {
@@ -238,84 +415,39 @@ extern "C"
     return res;
   }
 
-  void print_root_dir_line(char* str)
+  // bpb - sector 1
+  // fat - sector 2
+  // root dir - sector 36
+  // data - sector 68
+  unsigned long FAT::get_first_sector_of_cluster(unsigned int n)
   {
-    char ATTR_READ_WRITE = 0x00;
-    char ATTR_READ_ONLY = 0x01;
-    char ATTR_HIDDEN = 0x02;
-    char ATTR_SYSTEM = 0x04;
-    char ATTR_VOLUME_ID = 0x08;
-    char ATTR_DIRECTORY = 0x10;
-    char ATTR_ARCHIVE = 0x20;
-    char ATTR_LONG_NAME = ATTR_READ_ONLY | ATTR_HIDDEN | ATTR_SYSTEM | ATTR_VOLUME_ID;
-
-    // bytes 0-10
-    char short_name[12];
-    short_name[11] = '\0';
-    for (int i = 0; i < 11; i++)
+    // fat
+    // return 2
+    if (n == 0)
     {
-      short_name[i] = *(str + i);
+      return reserved_sectors_count + 1;
     }
-
-    // byte 11
-    char dir_attr = *(str + 11);
-    bool valid_dir_attr = dir_attr == ATTR_READ_WRITE;
-    valid_dir_attr = valid_dir_attr || dir_attr == ATTR_READ_ONLY;
-    valid_dir_attr = valid_dir_attr || dir_attr == ATTR_HIDDEN;
-    valid_dir_attr = valid_dir_attr || dir_attr == ATTR_SYSTEM;
-    valid_dir_attr = valid_dir_attr || dir_attr == ATTR_VOLUME_ID;
-    valid_dir_attr = valid_dir_attr || dir_attr == ATTR_DIRECTORY;
-    valid_dir_attr = valid_dir_attr || dir_attr == ATTR_ARCHIVE;
-    valid_dir_attr = valid_dir_attr || dir_attr == ATTR_LONG_NAME;
-
-    if ((!valid_dir_attr) || (dir_attr == ATTR_LONG_NAME))
+    // root dir
+    else if (n == 1)
     {
-      return;
+      // return 1 + (2 * 17) + 1 = 36
+      return reserved_sectors_count + (sectors_per_fat * fats_count) + 1;
     }
-    std::string attr_label = dir_attr == ATTR_READ_WRITE ? "READ WRITE" :
-      dir_attr == ATTR_READ_ONLY ? "READ ONLY" :
-      dir_attr == ATTR_HIDDEN ? "HIDDEN" :
-      dir_attr == ATTR_SYSTEM ? "SYSTEM" :
-      dir_attr == ATTR_VOLUME_ID ? "VOLUME ID" :
-      dir_attr == ATTR_DIRECTORY ? "DIRECTORY" :
-      dir_attr == ATTR_ARCHIVE ? "ARCHIVE" : "LONG NAME";
-
-    // byte 12 - supposed to be 0
-    char unused_ntr = *(str + 12);
-    // byte 13
-    int time_wtf = *(str + 13);
-    // bytes 14, 15
-    int creation_time = FAT::little_endian(str + 14, 2);
-    // bytes 16, 17
-    int creation_date = FAT::little_endian(str + 16, 2);
-    // bytes 18, 19
-    int last_access_date = FAT::little_endian(str + 18, 2);
-    // bytes 20, 21 - supposed to be 0
-    int unused_high_bits_clus_num = FAT::little_endian(str + 20, 2);
-    // bytes 22, 23
-    int last_write_time = FAT::little_endian(str + 22, 2);
-    // bytes 24, 25
-    int last_write_date = FAT::little_endian(str + 24, 2);
-    // bytes 26, 27
-    int first_cluster_number = FAT::little_endian(str + 26, 2);
-    // bytes 28, 29, 30, 31
-    unsigned long size = FAT::little_endian(str + 28, 4);
-
-    std::cout << "--------------------------------------\n";
-
-    std::cout << "Name: " << short_name << "\n";
-    std::cout << "Attributes: " << attr_label << "\n";
-    std::cout << "Unused ntr: " << unused_ntr << "\n";
-    std::cout << "Time wtf: " << time_wtf << "\n";
-    std::cout << "Creation time: " << creation_time << "\n";
-    std::cout << "Creation date: " << creation_date << "\n";
-    std::cout << "Last Access Date: " << last_access_date << "\n";
-    std::cout << "Unused high bits: " << unused_high_bits_clus_num << "\n";
-    std::cout << "Last write time: " << last_write_time << "\n";
-    std::cout << "Last write date: " << last_write_date << "\n";
-    std::cout << "First cluster name: " << first_cluster_number << "\n";
-    std::cout << "Size: " << size << "\n";
+    // data part n >= 2
+    else
+    {
+      // return 1 + (2 * 17) + 32 + 1 = 68
+      return reserved_sectors_count +
+        (sectors_per_fat * fats_count) + root_dir_sectors_count + 1 +
+        sectors_per_cluster * (n - 2);
+    }
   }
+
+  unsigned long FAT::get_offset_of_sector(unsigned long n)
+  {
+    return (n - 1) * bytes_per_sector;
+  }
+
 
   bool FAT::init(const char *mount_name)
   {
@@ -402,14 +534,8 @@ extern "C"
     volume_label[11] = '\0';
 
 
-    // reserved_sectors_count
-    all_fats_sectors_count = sectors_per_fat * fats_count;
     root_dir_sectors_count =
       ((root_entries_count * 32) + (bytes_per_sector - 1)) / bytes_per_sector;
-
-    fat_offset = reserved_sectors_count * bytes_per_sector;
-    root_dir_offset =
-      (reserved_sectors_count + all_fats_sectors_count) * bytes_per_sector;
 
     std::cout << ">> bytes_per_sector = " << bytes_per_sector << "\n";
     std::cout << ">> sectors_per_cluster = " << sectors_per_cluster << "\n";
@@ -419,12 +545,8 @@ extern "C"
     std::cout << ">> sectors_per_fat = " << sectors_per_fat << "\n";
     std::cout << ">> volume_serial_number = " << volume_serial_number << "\n";
     std::cout << ">> volume_label = " << volume_label << "\n";
-    std::cout << ">> reserved_sectors_count = " << reserved_sectors_count << "\n";
-    std::cout << ">> all_fats_sectors_count = " << all_fats_sectors_count << "\n";
     std::cout << ">> root_dir_sectors_count = " << root_dir_sectors_count << "\n";
-    std::cout << ">> fat_offset = " << fat_offset << "\n";
-    std::cout << ">> root_dir_offset = " << root_dir_offset << "\n";
-    std::cout << ">> eof_value = " << eof_value << "\n";
+    std::cout << "-------------------------------------\n";
 
 
     // read FAT table
@@ -435,6 +557,7 @@ extern "C"
 
     // go to the beginning of fat
     int tmp = -1;
+    int fat_offset = get_offset_of_sector(get_first_sector_of_cluster(0));
     res = OG_VMFileSeek(&mask, mount_fd, fat_offset, 0, &tmp);
     MachineSuspendSignals(&mask);
     if (res != VM_STATUS_SUCCESS)
@@ -470,15 +593,9 @@ extern "C"
       return false;
     }
 
-    // READ ROOT DIR
-    // FIGURE OUT CORRELATION BETWEEN ROOT DIR and FAT
-
-
-
-
-
-    // go to the beginning of root dir
+    // INIT ROOT DIRECTORY
     tmp = -1;
+    int root_dir_offset = get_offset_of_sector(get_first_sector_of_cluster(1));
     res = OG_VMFileSeek(&mask, mount_fd, root_dir_offset, 0, &tmp);
     MachineSuspendSignals(&mask);
     if (res != VM_STATUS_SUCCESS)
@@ -487,13 +604,27 @@ extern "C"
       return false;
     }
 
-    volatile int root_dir_data_len = root_dir_sectors_count * bytes_per_sector;
-    volatile unsigned char root_dir_data[root_dir_data_len];
-    void *root_dir_data_ptr = (void*) &root_dir_data;
-    int *root_dir_data_len_ptr = (int*) &root_dir_data_len;
+    int to_read_bytes = bytes_per_sector;
+    char buf[to_read_bytes];
+    for (int i = 0; i < to_read_bytes; i++)
+    {
+      buf[i] = '\0';
+    }
 
-    res = OG_VMFileRead(&mask, mount_fd, root_dir_data_ptr, root_dir_data_len_ptr);
-    MachineSuspendSignals(&mask);
+    bool done = false;
+    res = VM_STATUS_SUCCESS;
+    for (int i = 0; !done && (i < root_dir_sectors_count); i++)
+    {
+      res = OG_VMFileRead(&mask, mount_fd, buf, &to_read_bytes);
+      MachineSuspendSignals(&mask);
+
+      if (res != VM_STATUS_SUCCESS)
+      {
+        break;
+      }
+
+      done = add_files_dirs_to_cur_path(buf, to_read_bytes);
+    }
 
     if (res != VM_STATUS_SUCCESS)
     {
@@ -501,24 +632,7 @@ extern "C"
       return false;
     }
 
-    int i = 0;
-    while (true)
-    {
-      if ((root_dir_data[i] == 0x00) || (root_dir_data[i] == 0xE5))
-      {
-        break;
-      }
-      char tmp_str[32];
-
-      for (int j = 0; j < 32; j++)
-      {
-        tmp_str[j] = root_dir_data[i + j];
-      }
-
-      print_root_dir_line(tmp_str);
-      i += 32;
-
-    }
+    current_dir_cluster_number = 1;
 
     MachineResumeSignals(&mask);
     return true;
@@ -559,7 +673,7 @@ extern "C"
 
     int tick_ms = 0;
     TVMTick current_time = 0;
-    FAT fat;
+    FAT fat_fs;
 
     ~GlobalState()
     {
@@ -831,7 +945,7 @@ extern "C"
     create_main_thread();
     create_idle_thread();
 
-    if (!global_state.fat.init(mount))
+    if (!global_state.fat_fs.init(mount))
     {
       return VM_STATUS_FAILURE;
     }
@@ -1400,21 +1514,367 @@ extern "C"
 
 
 
+  // -+
+  // @TODO: expect short names only
+  // @TODO: implement mode and flags
+  // @TODO: implement absolute paths
+  // @TODO: implement relative subdirs
+  // @TODO: check errors
+  // @TODO: implement long names
+  // modes, flags ignored
+  TVMStatus VMFileOpen(const char *filename, int flags, int mode, int *filedescriptor)
+  {
+    // possible flags
+    // O_RDONLY, O_WRONLY, or O_RDWR
+
+    TMachineSignalState signal_mask_state;
+    MachineSuspendSignals(&signal_mask_state);
+
+    if ((filedescriptor == NULL) || (filename == NULL))
+    {
+      MachineResumeSignals(&signal_mask_state);
+      return VM_STATUS_ERROR_INVALID_PARAMETER;
+    }
+
+    TVMStatus res = VMFileSystemValidPathName(filename);
+
+    if (res != VM_STATUS_SUCCESS)
+    {
+      MachineResumeSignals(&signal_mask_state);
+      return res;
+    }
+
+    char short_name[13] = {
+      '\0', '\0', '\0', '\0', '\0', '\0',
+      '\0', '\0', '\0', '\0', '\0', '\0', '\0'};
+
+
+    for (int i = 0; (i < 13) && (filename[i] != '\0'); i++)
+    {
+      short_name[i] = std::toupper(filename[i]);
+    }
+
+    std::string short_name_key(short_name);
+
+    auto iter = global_state.fat_fs.current_dir_items.find(short_name_key);
+    bool is_key_present = iter != global_state.fat_fs.current_dir_items.end();
+
+    if (!is_key_present)
+    {
+      std::cout << "FILE with short name '" << short_name_key << "' not found\n";
+      std::cout << "TO IMPLEMENT\n";
+      MachineResumeSignals(&signal_mask_state);
+      return VM_STATUS_FAILURE;
+    }
+
+    DirItem *item_ptr = &(global_state.fat_fs.current_dir_items[short_name_key]);
+
+    std::cout << "FOUND: " << item_ptr -> short_name << " cluster: " << item_ptr -> first_cluster_number << "\n";
+
+    int new_fd = global_state.fat_fs.get_next_fd();
+
+    FdDescription desc;
+    auto sector =
+      global_state.fat_fs.get_first_sector_of_cluster(item_ptr -> first_cluster_number);
+
+    desc.mount_vol_offset = global_state.fat_fs.get_offset_of_sector(sector);
+    desc.bytes_processed_total = 0;
+    desc.bytes_processed_this_cluster = 0;
+    desc.dir_item_ptr = item_ptr;
+    desc.cur_cluster_num = item_ptr -> first_cluster_number;
+
+    *filedescriptor = new_fd;
+    global_state.fat_fs.fds[new_fd] = desc;
+
+    MachineResumeSignals(&signal_mask_state);
+    return VM_STATUS_SUCCESS;
+  }
 
   // -+
-  TVMStatus VMFileRead(int filedescriptor, void *data, int *length)
+  TVMStatus VMFileClose(int filedescriptor)
   {
     TMachineSignalState signal_mask_state;
     MachineSuspendSignals(&signal_mask_state);
 
     if ((filedescriptor >= 0) && (filedescriptor <= 2))
     {
-      return OG_VMFileRead(&signal_mask_state, filedescriptor, data, length);
+      return OG_VMFileClose(&signal_mask_state, filedescriptor);
     }
 
     MachineResumeSignals(&signal_mask_state);
     return VM_STATUS_FAILURE;
   }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  // +--
+  // @TODO: fix total num read
+  // @TODO: manage size
+  TVMStatus VMFileRead(int filedescriptor, void *data, int *length)
+  {
+    TMachineSignalState mask;
+    MachineSuspendSignals(&mask);
+
+    if ((filedescriptor >= 0) && (filedescriptor <= 2))
+    {
+      return OG_VMFileRead(&mask, filedescriptor, data, length);
+    }
+
+    FdDescription *fd_desc = &(global_state.fat_fs.fds[filedescriptor]);
+    int expected_total_bytes = *length;
+    int bytes_until_eof =
+      fd_desc -> dir_item_ptr -> size - fd_desc -> bytes_processed_total;
+    if (expected_total_bytes > bytes_until_eof)
+    {
+      expected_total_bytes = bytes_until_eof;
+    }
+
+    int total_bytes_read_in_this_read_call = 0;
+    bool is_failure = false;
+    bool is_last_read = false;
+
+    do
+    {
+      if (expected_total_bytes == 0)
+      {
+        is_last_read = true;
+        break;
+      }
+
+      // Navigation
+      // @TODO: handle end of file: 0xffff
+      if (fd_desc -> bytes_processed_this_cluster == 1024)
+      {
+        auto next_cluster_num =
+          global_state.fat_fs.fat[fd_desc -> cur_cluster_num];
+        // if no next cluster??
+
+        fd_desc -> bytes_processed_this_cluster = 0;
+        fd_desc -> cur_cluster_num = next_cluster_num;
+
+        auto sector =
+          global_state.fat_fs.get_first_sector_of_cluster(next_cluster_num);
+
+        fd_desc -> mount_vol_offset =
+          global_state.fat_fs.get_offset_of_sector(sector);
+      }
+
+      auto cluster_offset = fd_desc -> mount_vol_offset +
+        fd_desc -> bytes_processed_this_cluster;
+
+      // what if it doesn't work?
+      // @TODO: to consider
+      int new_offset = -1;
+      OG_VMFileSeek(
+        &mask,
+        global_state.fat_fs.mount_fd,
+        cluster_offset,
+        0,
+        &new_offset
+      );
+      MachineSuspendSignals(&mask);
+
+      // @TODO ?????
+      if (new_offset != cluster_offset)
+      {
+        std::cout << "[READ] OFFSETS ARE DIFFEREENT: " <<
+          new_offset << " " << cluster_offset << "\n";
+      }
+
+
+      // @TODO remove 1024
+      int cluster_bytes_left = 1024 - fd_desc -> bytes_processed_this_cluster;
+      int to_read_bytes = expected_total_bytes - total_bytes_read_in_this_read_call;
+
+      if (to_read_bytes > cluster_bytes_left)
+      {
+        to_read_bytes = cluster_bytes_left;
+      }
+      else
+      {
+        is_last_read = true;
+      }
+
+      TVMStatus res = OG_VMFileRead(
+        &mask,
+        global_state.fat_fs.mount_fd,
+        data + total_bytes_read_in_this_read_call,
+        &to_read_bytes
+      );
+      MachineSuspendSignals(&mask);
+
+      if (res != VM_STATUS_SUCCESS)
+      {
+        is_failure = true;
+      }
+
+      total_bytes_read_in_this_read_call += to_read_bytes;
+      fd_desc -> bytes_processed_this_cluster += to_read_bytes;
+      fd_desc -> bytes_processed_total += to_read_bytes;
+      fd_desc -> mount_vol_offset += to_read_bytes;
+
+    }
+    while(!is_last_read && !is_failure);
+
+    // @TODO: wrong
+    *length = total_bytes_read_in_this_read_call;
+
+
+    if (is_failure)
+    {
+      MachineResumeSignals(&mask);
+      return VM_STATUS_FAILURE;
+    }
+
+    MachineResumeSignals(&mask);
+    return VM_STATUS_SUCCESS;
+
+
+
+
+
+
+
+
+
+
+    //
+    //
+    //
+    //
+    //
+
+
+    // TVMStatus OG_VMFileSeek(TMachineSignalStateRef mask, int filedescriptor, int offset, int whence, int *newoffset)
+
+
+    // have a while loop?
+    // int new_offset = -1;
+    // OG_VMFileSeek(
+    //   &signal_mask_state,
+    //   global_state.fat_fs.mount_fd,
+    //   fd_desc -> mount_vol_offset + fd_desc -> bytes_processed_this_cluster,
+    //   0,
+    //   &new_offset
+    // );
+    // MachineSuspendSignals(&signal_mask_state);
+    //
+    // if (new_offset != (fd_desc -> mount_vol_offset + fd_desc -> bytes_processed_this_cluster))
+    // {
+    //   std::cout << "[READ] OFFSETS ARE DIFFEREENT: " << new_offset << " " << (fd_desc -> mount_vol_offset + fd_desc -> bytes_processed_this_cluster) << "\n";
+    // }
+
+    // auto cluster_bytes_left = 1024 - fd_desc -> bytes_processed_this_cluster;
+    // auto to_read_bytes = cluster_bytes_left >= *length ?
+    //   *length: cluster_bytes_left;
+
+
+
+    // OG_VMFileRead(
+    //   &signal_mask_state,
+    //   global_state.fat_fs.mount_fd,
+    //   data,
+    //   &to_read_bytes
+    // );
+    // MachineSuspendSignals(&signal_mask_state);
+    // fd_desc -> bytes_processed_this_cluster += to_read_bytes;
+    // fd_desc -> bytes_processed_total += to_read_bytes;
+    //
+    // *length = to_read_bytes;
+
+
+
+    // navigate
+    // @TODO: remove hardcoding
+    // @TODO: generalize for root dir
+    // if (fd_desc -> bytes_processed_this_cluster == 1024)
+    // {
+    //   fd_desc -> bytes_processed_this_cluster = 0;
+    //
+    //   auto next_cluster_num = global_state.fat_fs.fat[fd_desc -> cur_cluster_num];
+    //   fd_desc -> cur_cluster_num = next_cluster_num;
+    //
+    //   auto sector =
+    //     global_state.fat_fs.get_first_sector_of_cluster(next_cluster_num);
+    //
+    //   fd_desc -> mount_vol_offset = global_state.fat_fs.get_offset_of_sector(sector);
+    // }
+
+
+    // MachineResumeSignals(&signal_mask_state);
+    // return VM_STATUS_SUCCESS;
+  }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
   // -+
   TVMStatus VMFileWrite(int filedescriptor, void *data, int *length)
@@ -1491,13 +1951,17 @@ extern "C"
     MachineFileOpen(filename, flags, mode, OG_FileCB, arg_ptr);
     schedule_threads(mask);
 
+    std::cout << ">> FINISHED OPEN\n";
+
     if (arg.result < 0)
     {
+      std::cout << ">> ERR\n";
       return VM_STATUS_FAILURE;
     }
 
     *filedescriptor = arg.result;
 
+    std::cout << *filedescriptor << '\n';
     return VM_STATUS_SUCCESS;
 
   }
@@ -1737,16 +2201,44 @@ extern "C"
       return VM_STATUS_ERROR_INVALID_PARAMETER;
     }
 
-    global_state.fat.current_working_directory(abspath);
+    global_state.fat_fs.current_working_directory(abspath);
     std::cout << "HERE\n";
 
     MachineResumeSignals(&signal_mask_state);
     return VM_STATUS_SUCCESS;
   }
 
-  // -
+  /*
+  - Support cur dir changes
+  - Support cur dir multiple layer changes
+  - Support many layer changes
+  - Support all possible file names
+  */
   TVMStatus VMDirectoryChange(const char *path)
   {
-    return VM_STATUS_FAILURE;
+    TMachineSignalState signal_mask_state;
+    MachineSuspendSignals(&signal_mask_state);
+
+    if (path == NULL)
+    {
+      MachineResumeSignals(&signal_mask_state);
+      return VM_STATUS_ERROR_INVALID_PARAMETER;
+    }
+
+    // Step 1: check if matches any short dir
+    // - Create Short File Name version: UPPER CASE
+    // - If multiple short file names match, navigate to 1st one
+    // Step 2:
+    // - Create Long File Name key (lower case)
+    // - Check if any match
+    // - if some match, navigate
+    // - if no match, error
+
+    std::cout << path << "\n";
+
+    // return VM_STATUS_FAILURE
+
+    MachineResumeSignals(&signal_mask_state);
+    return VM_STATUS_SUCCESS;
   }
 }
