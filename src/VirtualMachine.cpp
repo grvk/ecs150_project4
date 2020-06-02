@@ -213,7 +213,90 @@ extern "C"
       unsigned int last_write_date;
 
       unsigned int first_cluster_number;
-      unsigned long size;
+      unsigned int size;
+
+      void byte_code(char* buffer)
+      {
+        for (int i = 0; i < 32; i++)
+        {
+          buffer[i] = '\0';
+        }
+
+        int buffer_i = 0;
+        int short_name_i = 0;
+        bool is_extension_present = false;
+
+        while (short_name_i < short_name.size())
+        {
+          if ((short_name_i == 0) && (short_name[short_name_i] == 0xE5))
+          {
+            buffer[buffer_i] = 0x05;
+            buffer_i += 1;
+            short_name_i += 1;
+          }
+          else if (short_name[short_name_i] == '.')
+          {
+            is_extension_present = true;
+            short_name_i += 1;
+            break;
+          }
+          else
+          {
+            buffer[buffer_i] = short_name[short_name_i];
+            buffer_i += 1;
+            short_name_i += 1;
+          }
+
+        }
+
+        // we have next buffer_i; next short_name_i; is_extension_present
+        if (is_extension_present)
+        {
+          while (buffer_i <= 7)
+          {
+            buffer[buffer_i] = 0x20;
+            buffer_i += 1;
+          }
+
+          while (short_name_i < short_name.size())
+          {
+            buffer[buffer_i] = short_name[short_name_i];
+            buffer_i += 1;
+            short_name_i += 1;
+          }
+
+        }
+
+        while (buffer_i <= 10)
+        {
+          buffer[buffer_i] = 0x20;
+          buffer_i += 1;
+        }
+
+        // done with name
+        buffer[11] = attribute;
+        buffer[12] = unused_ntr;
+        buffer[13] = char(create_time_tenth);
+
+
+
+        // // bytes 14, 15
+        // item.create_time = FAT::little_endian(buffer + i + 14, 2);
+        // // bytes 16, 17
+        // item.create_date = FAT::little_endian(buffer + i + 16, 2);
+        // // bytes 18, 19
+        // item.last_access_date = FAT::little_endian(buffer + i + 18, 2);
+        // // bytes 20, 21
+        // item.unused_cluster_bits = FAT::little_endian(buffer + i + 20, 2);
+        // // bytes 22, 23
+        // item.last_write_time = FAT::little_endian(buffer + i + 22, 2);
+        // // bytes 24, 25
+        // item.last_write_date = FAT::little_endian(buffer + i + 24, 2);
+        // // bytes 26, 27
+        // item.first_cluster_number = FAT::little_endian(buffer + i + 26, 2);
+        // // bytes 28, 29, 30, 31
+        // item.size = FAT::little_endian(buffer + i + 28, 4);
+      }
 
       static bool is_good_attribute(unsigned char attr)
       {
@@ -249,12 +332,13 @@ extern "C"
 
     char volume_label[12]; // @TODO: unsigned char? 11?
 
-
     bool add_files_dirs_to_cur_path(char* buffer, int len);
 
     inline static int fd_count = 101;
 
   public:
+    static const unsigned char EOF_FAT_CELL = 0xFFFF;
+    static const unsigned char FREE_FAT_CELL = 0x0000;
     static const unsigned char ATTR_READ_WRITE = 0x00;
     static const unsigned char ATTR_READ_ONLY = 0x01;
     static const unsigned char ATTR_HIDDEN = 0x02;
@@ -280,6 +364,7 @@ extern "C"
     unsigned long get_first_sector_of_cluster(unsigned int n);
     unsigned long get_offset_of_sector(unsigned long n);
     void current_working_directory(char *abs_path);
+    bool add_new_file_entry(TMachineSignalStateRef mask, const char* file_name);
     int get_next_fd();
   };
 
@@ -395,13 +480,197 @@ extern "C"
         item.size = FAT::little_endian(buffer + i + 28, 4);
 
         current_dir_items[item.short_name] = item;
-        std::cout << ">> Adding '" << item.short_name << "'\n";
+        std::cout << ">> Adding '"
+          << item.short_name
+          << " 1st cluster = "
+          << item.first_cluster_number
+          << " size = "
+          << item.size
+          <<  "\n";
       }
     }
 
 
     return reached_end;
   }
+
+
+  bool FAT::add_new_file_entry(TMachineSignalStateRef mask, const char* short_name_key)
+  {
+    // // allocate cell in fat array
+    // // add entry to the root dir
+    // // read it and create an item dir
+
+    int free_cluster_num = 2;
+    while(fat[free_cluster_num] != FAT::FREE_FAT_CELL)
+    {
+      free_cluster_num += 1;
+    }
+
+    // @TODO: safety check
+    auto fat_size = sectors_per_fat * bytes_per_sector / 2;
+    if (free_cluster_num >= fat_size)
+    {
+      std::cout << "[add_new_file_entry] FAT ALLOCATION OVERFLOW ERROR\n";
+      return false;
+    }
+
+    fat[free_cluster_num] = FAT::EOF_FAT_CELL;
+
+    // @TODO: check res?
+    int byte_offset = get_offset_of_sector(get_first_sector_of_cluster(0))
+      + free_cluster_num * 2;
+
+    int tmp = -1;
+    TVMStatus res = OG_VMFileSeek(mask, mount_fd, byte_offset, 0, &tmp);
+    MachineSuspendSignals(mask);
+
+    if ((tmp != byte_offset) || (res != VM_STATUS_SUCCESS))
+    {
+      std::cout << "[add_new_file_entry] Failed to seek. Expected = " << byte_offset  << ". Received = " << tmp << ". res = " << res << " \n";
+      return false;
+    }
+
+
+    char[3] data_to_write = { 0xFF, 0xFF, '\0'};
+    int bytes_to_write = 2;
+    res = OG_VMFileWrite(mask, mount_fd, (void*) data_to_write, &bytes_to_write);
+    MachineSuspendSignals(mask);
+
+    if ((bytes_to_write != 2) || (res != VM_STATUS_SUCCESS))
+    {
+      std::cout << "[add_new_file_entry] Failed to update fat table - write: Res = " << res << ". (exp = 2). Wrote = " << bytes_to_write << " \n";
+      return false;
+    }
+
+    // allocate and add dir item
+    DirItem new_item;
+    new_item.short_name = short_name_key;
+    new_item.attribute = 0x00; // @TODO: to save proper
+    new_item.unused_ntr = 0x00;
+    new_item.create_time_tenth = 0x00; // @TODO: to save proper
+    new_item.create_time = 0x0000; // @TODO: to save proper
+    new_item.create_date = 0x0000; // @TODO: to save proper
+    new_item.last_access_date = 0x0000; // @TODO: to save proper
+    new_item.unused_cluster_bits = 0x0000;
+    new_item.last_write_time = 0x0000; // @TODO: to save proper
+    new_item.last_write_date = 0x0000; // @TODO: to save proper
+    new_item.first_cluster_number = free_cluster_num;
+    new_item.size = 0x0000;
+
+    current_dir_items[new_item.short_name] = new_item;
+    std::cout << ">> [New File] Adding '"
+      << new_item.short_name
+      << " 1st cluster = "
+      << new_item.first_cluster_number
+      << " size = "
+      << new_item.size
+      <<  "\n";
+
+
+    // ADDING TO CUR DIR
+    int root_dir_offset = get_offset_of_sector(get_first_sector_of_cluster(1));
+    tmp = -1;
+    res = OG_VMFileSeek(mask, mount_fd, root_dir_offset, 0, &tmp);
+    MachineSuspendSignals(mask);
+
+    if ((tmp != root_dir_offset) || (res != VM_STATUS_SUCCESS))
+    {
+      std::cout << "[add_new_file_entry] Failed to seek root dir. Expected = " << root_dir_offset  << ". Received = " << tmp << ". res = " << res << " \n";
+      return false;
+    }
+
+
+    int to_read_bytes = bytes_per_sector;
+    char buf[to_read_bytes];
+    for (int i = 0; i < to_read_bytes; i++)
+    {
+      buf[i] = '\0';
+    }
+
+    bool done = false;
+    res = VM_STATUS_SUCCESS;
+
+    for (int i = 0; i < root_dir_sectors_count; i++)
+    {
+      res = OG_VMFileRead(&mask, mount_fd, buf, &to_read_bytes);
+      MachineSuspendSignals(&mask);
+
+      if ((res != VM_STATUS_SUCCESS) || (to_read_bytes != bytes_per_sector))
+      {
+        std::cout << "[fat.init] Failed to read root dir. Expected = " << bytes_per_sector << ". Read = " << to_read_bytes << ". Res = " << res << "\n";
+        res = VM_STATUS_FAILURE;
+        break;
+      }
+
+      int cur_root_byte_offset = 0;
+      for (int cur_root_byte_offset = 0; cur_root_byte_offset < to_read_bytes; cur_root_byte_offset += 32)
+      {
+        if ((buf[cur_root_byte_offset] == 0x00) && (buf[cur_root_byte_offset + 1] == 0x00))
+        {
+          done = true;
+          root_dir_offset += cur_root_byte_offset;
+          break;
+        }
+      }
+      if (done)
+      {
+        break;
+      }
+
+      root_dir_offset += bytes_per_sector;
+    }
+
+    // SAVING NEW ITEM IN ROOT DIR: root_dir_offset
+    tmp = -1;
+    res = OG_VMFileSeek(mask, mount_fd, root_dir_offset, 0, &tmp);
+    MachineSuspendSignals(mask);
+
+    if ((tmp != root_dir_offset) || (res != VM_STATUS_SUCCESS))
+    {
+      std::cout << "[add_new_file_entry] Failed to seek [2] root dir. Expected = " << root_dir_offset  << ". Received = " << tmp << ". res = " << res << " \n";
+      return false;
+    }
+
+    int length = 32;
+    char[32] tmp_buf;
+    new_item.byte_code(tmp_buf);
+
+    res = OG_VMFileWrite(mask, mount_fd, (void*) tmp_buf, &length);
+    MachineSuspendSignals(mask);
+
+    if ((length != 32) || (res != VM_STATUS_SUCCESS))
+    {
+      std::cout << "[add_new_file_entry] Failed to update/writ to root dir. Expected = 32. Received = " << length << ". res = " << res << " \n";
+      return false;
+    }
+
+    return true;
+  }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    // Save DirItem to root dir
+
+
+
+  }
+
+
 
   unsigned long FAT::little_endian(void *ptr, int count)
   {
@@ -618,8 +887,10 @@ extern "C"
       res = OG_VMFileRead(&mask, mount_fd, buf, &to_read_bytes);
       MachineSuspendSignals(&mask);
 
-      if (res != VM_STATUS_SUCCESS)
+      if ((res != VM_STATUS_SUCCESS) || (to_read_bytes != bytes_per_sector))
       {
+        std::cout << "[fat.init] Failed to read root dir. Expected = " << bytes_per_sector << ". Read = " << to_read_bytes << ". Res = " << res << "\n";
+        res = VM_STATUS_FAILURE;
         break;
       }
 
@@ -950,7 +1221,7 @@ extern "C"
       return VM_STATUS_FAILURE;
     }
 
-    fnEntry(argc, argv);
+    // fnEntry(argc, argv);
 
     MachineTerminate();
     VMUnloadModule();
@@ -1563,9 +1834,14 @@ extern "C"
     {
       std::cout << "FILE with short name '" << short_name_key << "' not found\n";
       std::cout << "TO IMPLEMENT\n";
-      MachineResumeSignals(&signal_mask_state);
-      return VM_STATUS_FAILURE;
+
+      // @TODO: create short name key. pass instead of filename
+      global_state.fat_fs.add_new_file_entry(&signal_mask_state, filename);
+      MachineSuspendSignals(&signal_mask_state);
     }
+
+
+
 
     DirItem *item_ptr = &(global_state.fat_fs.current_dir_items[short_name_key]);
 
@@ -1730,9 +2006,7 @@ extern "C"
     }
     while(!is_last_read && !is_failure);
 
-    // @TODO: wrong
     *length = total_bytes_read_in_this_read_call;
-
 
     if (is_failure)
     {
