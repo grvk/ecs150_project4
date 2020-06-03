@@ -23,6 +23,12 @@ extern "C"
   TVMStatus OG_VMFileWrite(TMachineSignalStateRef mask, int filedescriptor, void *data, int *length);
   TVMStatus OG_VMFileSeek(TMachineSignalStateRef mask, int filedescriptor, int offset, int whence, int *newoffset);
 
+  TVMStatus OG_VMMutexCreate(TMachineSignalStateRef mask, TVMMutexIDRef mutexref);
+  TVMStatus OG_VMMutexDelete(TMachineSignalStateRef mask, TVMMutexID mutex);
+  TVMStatus OG_VMMutexQuery(TMachineSignalStateRef mask, TVMMutexID mutex, TVMThreadIDRef ownerref);
+  TVMStatus OG_VMMutexAcquire(TMachineSignalStateRef mask, TVMMutexID mutex, TVMTick timeout);
+  TVMStatus OG_VMMutexRelease(TMachineSignalStateRef mask, TVMMutexID mutex);
+
   struct SkeletonArgs
   {
     TVMThreadEntry fn;
@@ -89,6 +95,71 @@ extern "C"
   };
 
   TCB *IDLE_THREAD_PTR = NULL;
+
+
+  /*
+  - value_types:
+  -- 0 - int8_t (1 byte)
+  -- 1 - uint8_t (1 byte)
+  -- 2 - int16_t
+  -- 3 - uint16_t
+  -- 4 - int32_t
+  -- 5 - uint32_t
+  */
+  void TO_LITTLE_ENDIAN_INT(uint8_t *byte_buffer, int buffer_len, void *value, uint8_t type)
+  {
+    if (type == 0)
+    {
+      int8_t* ptr = (int8_t*) value;
+      for (int i = buffer_len - 1; i >= 0; i--)
+      {
+        *ptr = (*ptr << 8) + *(byte_buffer + i);
+      }
+    }
+    else if (type == 1)
+    {
+      uint8_t* ptr = (uint8_t*) value;
+      for (int i = buffer_len - 1; i >= 0; i--)
+      {
+        *ptr = (*ptr << 8) + *(byte_buffer + i);
+      }
+    }
+    else if (type == 2)
+    {
+      int16_t* ptr = (int16_t*) value;
+      for (int i = buffer_len - 1; i >= 0; i--)
+      {
+        *ptr = (*ptr << 8) + *(byte_buffer + i);
+      }
+    }
+    else if (type == 3)
+    {
+      uint16_t* ptr = (uint16_t*) value;
+      for (int i = buffer_len - 1; i >= 0; i--)
+      {
+        *ptr = (*ptr << 8) + *(byte_buffer + i);
+      }
+    }
+    else if (type == 4)
+    {
+      int32_t* ptr = (int32_t*) value;
+      for (int i = buffer_len - 1; i >= 0; i--)
+      {
+        *ptr = (*ptr << 8) + *(byte_buffer + i);
+      }
+    }
+    else if (type == 5)
+    {
+      uint32_t* ptr = (uint32_t*) value;
+      for (int i = buffer_len - 1; i >= 0; i--)
+      {
+        *ptr = (*ptr << 8) + *(byte_buffer + i);
+      }
+    }
+  }
+
+
+
 
   // used internally for comparison of priorities.
   // Because of this functiton we're independent from actual values
@@ -193,472 +264,124 @@ extern "C"
     }
   };
 
-  class DirItem
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  class EntryDirectory
   {
-    public:
-      std::string short_name;
-      std::string long_name;
-      unsigned char attribute;
-      unsigned char unused_ntr;
 
-      // @TODO: figure out what it is
-      unsigned int create_time_tenth;
-      unsigned int create_time;
-      unsigned int create_date;
-      unsigned int last_access_date;
-
-      unsigned int unused_cluster_bits;
-
-      unsigned int last_write_time;
-      unsigned int last_write_date;
-
-      unsigned int first_cluster_number;
-      unsigned long size;
-
-      static bool is_good_attribute(unsigned char attr)
-      {
-        return ((attr >> 6) == 0);
-      }
   };
 
-
-  struct FdDescription
+  class EntryFile
   {
-  public:
-    int mount_vol_offset = -1;
-    int bytes_processed_total = 0;
-    int bytes_processed_this_cluster = 0;
-    int cur_cluster_num = -1;
-    DirItem *dir_item_ptr = NULL;
+
   };
 
-  // @TODO: MANAGE BACKUP
-  class FAT
+  class Directory
   {
-    unsigned long bytes_per_sector; // BPB_BytsPerSec
-    unsigned long sectors_per_cluster; // BPB_SecPerClus
-    unsigned long fats_count; // BPB_NumFATs
-    unsigned long root_entries_count; // BPB_RootEntCnt
-    unsigned long total_sectors_count; // BPB_TotSec16 or BPB_TotSec32
-    unsigned long media_value; // BPB_Media
-    unsigned long eof_value; // 0xff <media_value>
-    unsigned long sectors_per_fat; // BPB_FATSz16
-    unsigned long volume_serial_number; // BS_VolID
-    unsigned long reserved_sectors_count; // BPB_RsvdSecCnt
-    unsigned long root_dir_sectors_count;
+    std::string path;
+    int real_fd = -1;
+    int real_fd_offset;
 
-    char volume_label[12]; // @TODO: unsigned char? 11?
+    bool is_lock_free = true;
+    TVMThreadID lock_owner_id = 0;
+    TVMMutexID lock_id;
 
-
-    bool add_files_dirs_to_cur_path(char* buffer, int len);
-
-    inline static int fd_count = 101;
+    bool is_real_fd_access_allowed();
 
   public:
-    static const unsigned char ATTR_READ_WRITE = 0x00;
-    static const unsigned char ATTR_READ_ONLY = 0x01;
-    static const unsigned char ATTR_HIDDEN = 0x02;
-    static const unsigned char ATTR_SYSTEM = 0x04;
-    static const unsigned char ATTR_VOLUME_ID = 0x08;
-    static const unsigned char ATTR_DIRECTORY = 0x10;
-    static const unsigned char ATTR_ARCHIVE = 0x20;
-    static const unsigned char ATTR_LONG_NAME =
-      ATTR_READ_ONLY | ATTR_HIDDEN | ATTR_SYSTEM | ATTR_VOLUME_ID;
+    Directory(std::string pth, int real_f_d, int real_f_d_offset);
+    ~Directory();
 
-    static unsigned long little_endian(void *ptr, int count);
-    static std::string produce_short_name(char* buf);
+    std::string get_path() { return path; }
 
-    int mount_fd = -1;
-    const char *mount_name = NULL;
-    int current_dir_cluster_number;
-    std::map<std::string, DirItem> current_dir_items;
-    std::map<int, FdDescription> fds;
-    std::vector<std::string> path;
-    std::vector<unsigned int> fat;
+    bool get_real_fd(int *fd);
+    bool get_real_fd_offset(int *fd_offset);
 
-    bool init(const char *mount_name);
-    unsigned long get_first_sector_of_cluster(unsigned int n);
-    unsigned long get_offset_of_sector(unsigned long n);
-    void current_working_directory(char *abs_path);
-    int get_next_fd();
+    bool set_real_fd(int fd);
+    bool set_real_fd_offset(int fd_offset);
+
+    void acquire_lock(TMachineSignalStateRef mask_ptr);
+    void release_lock(TMachineSignalStateRef mask_ptr);
   };
 
-  int FAT::get_next_fd()
+  // @TODO LIST:
+  // - Delete dynamically creeated Directories
+  class FatFS
   {
-    int fd = FAT::fd_count;
-    FAT::fd_count += 1;
-    return fd;
-  }
-
-  // expects 11 bytes
-  std::string FAT::produce_short_name(char* buf)
-  {
-    char short_name[13] = {
-      '\0', '\0', '\0', '\0', '\0', '\0',
-      '\0', '\0', '\0', '\0', '\0', '\0', '\0'};
-
-    int i = 0;
-    for (int j = 0; j < 8; j++)
-    {
-      if ((j == 0) && (buf[j] == 0x05))
-      {
-        short_name[i] = 0xE5;
-        i += 1;
-      }
-      else if (buf[j] != 0x20)
-      {
-        short_name[i] = buf[j];
-        i += 1;
-      }
-    }
-
-    if (buf[8] != 0x20)
-    {
-      short_name[i] = '.';
-      i += 1;
-    }
-
-    for (int j = 8; j < 11; j++)
-    {
-      if (buf[j] != 0x20)
-      {
-        short_name[i] = buf[j];
-        i += 1;
-      }
-    }
-
-    return std::string(short_name);
-  }
+    std::string mount_name;
+    Directory *cur_dir = NULL;
 
 
-  // std::cout << "--------------------------------------\n";
-  //
-  // std::cout << "Name: " << short_name << "\n";
-  // std::cout << "Attributes: " << attr_label << "\n";
-  // std::cout << "Unused ntr: " << unused_ntr << "\n";
-  // std::cout << "Time wtf: " << time_wtf << "\n";
-  // std::cout << "Creation time: " << creation_time << "\n";
-  // std::cout << "Creation date: " << creation_date << "\n";
-  // std::cout << "Last Access Date: " << last_access_date << "\n";
-  // std::cout << "Unused high bits: " << unused_high_bits_clus_num << "\n";
-  // std::cout << "Last write time: " << last_write_time << "\n";
-  // std::cout << "Last write date: " << last_write_date << "\n";
-  // std::cout << "First cluster name: " << first_cluster_number << "\n";
-  // std::cout << "Size: " << size << "\n";
-  bool FAT::add_files_dirs_to_cur_path(char* buffer, int len)
-  {
-    bool reached_end = false;
+    bool is_fat_lock_free = true;
+    TVMThreadID fat_lock_owner_id = 0;
+    TVMMutexID fat_lock_id;
+    std::vector<uint32_t> fat_arr;
 
-    int LINE_LENGTH = 32; // 32 bytes
+    // METADATA
+    uint16_t bytes_per_sector;
+    uint8_t sectors_per_cluster;
+    uint16_t reserved_sectors_count;
+    uint8_t fats_count;
+    uint16_t root_entries_count;
+    uint32_t total_sectors_count;
+    uint32_t root_dir_sectors_count;
+    uint8_t media_value;
+    uint16_t eof_value;
+    uint16_t sectors_per_fat;
+    uint32_t volume_serial_number;
+    std::string volume_label;
 
-    for (int i = 0; !reached_end && (i < len); i += LINE_LENGTH)
-    {
-      if (buffer[i] == 0x00)
-      {
-        reached_end = true;
-      }
-      else if (buffer[i] != 0xE5)
-      {
-        unsigned char attr = *(buffer + i + 11);
+    uint32_t fat_size;
 
-        if (!DirItem::is_good_attribute(attr) || (attr == FAT::ATTR_LONG_NAME))
-        {
-          continue;
-        }
+    bool is_fat_array_access_allowed();
 
-        DirItem item;
-        // bytes 0-10
+    // n = 0 -> fat array offset
+    // n = 1 -> root dir offset
+    // n >= 2 -> data offset
+    int get_offset_of_cluster(int n);
 
-        item.short_name = FAT::produce_short_name(buffer + i);
+    bool init_metadata(TMachineSignalStateRef mask_ptr);
+    bool init_fat_array(TMachineSignalStateRef mask_ptr);
 
-        // byte 11
-        item.attribute = attr;
-        // byte 12
-        item.unused_ntr = *(buffer + i + 12);
-        // byte 13
-        item.create_time_tenth = *(buffer + i + 13);
-        // bytes 14, 15
-        item.create_time = FAT::little_endian(buffer + i + 14, 2);
-        // bytes 16, 17
-        item.create_date = FAT::little_endian(buffer + i + 16, 2);
-        // bytes 18, 19
-        item.last_access_date = FAT::little_endian(buffer + i + 18, 2);
-        // bytes 20, 21
-        item.unused_cluster_bits = FAT::little_endian(buffer + i + 20, 2);
-        // bytes 22, 23
-        item.last_write_time = FAT::little_endian(buffer + i + 22, 2);
-        // bytes 24, 25
-        item.last_write_date = FAT::little_endian(buffer + i + 24, 2);
-        // bytes 26, 27
-        item.first_cluster_number = FAT::little_endian(buffer + i + 26, 2);
-        // bytes 28, 29, 30, 31
-        item.size = FAT::little_endian(buffer + i + 28, 4);
+    void debug_print_bpb_metadata();
+  public:
+    bool init(const char *mount_name_ptr);
 
-        current_dir_items[item.short_name] = item;
-        std::cout << ">> Adding '" << item.short_name << "'\n";
-      }
-    }
+    void acquire_fat_lock(TMachineSignalStateRef mask_ptr);
+    void release_fat_lock(TMachineSignalStateRef mask_ptr);
+    std::vector<uint32_t>* get_fat_array();
+  };
 
 
-    return reached_end;
-  }
-
-  unsigned long FAT::little_endian(void *ptr, int count)
-  {
-    unsigned char* ch_ptr = (unsigned char*) ptr;
-    unsigned long res = 0;
-    for (int i = count - 1; i >= 0; i--)
-    {
-      res = (res << 8) + *(ch_ptr + i);
-    }
-
-    return res;
-  }
-
-  // bpb - sector 1
-  // fat - sector 2
-  // root dir - sector 36
-  // data - sector 68
-  unsigned long FAT::get_first_sector_of_cluster(unsigned int n)
-  {
-    // fat
-    // return 2
-    if (n == 0)
-    {
-      return reserved_sectors_count + 1;
-    }
-    // root dir
-    else if (n == 1)
-    {
-      // return 1 + (2 * 17) + 1 = 36
-      return reserved_sectors_count + (sectors_per_fat * fats_count) + 1;
-    }
-    // data part n >= 2
-    else
-    {
-      // return 1 + (2 * 17) + 32 + 1 = 68
-      return reserved_sectors_count +
-        (sectors_per_fat * fats_count) + root_dir_sectors_count + 1 +
-        sectors_per_cluster * (n - 2);
-    }
-  }
-
-  unsigned long FAT::get_offset_of_sector(unsigned long n)
-  {
-    return (n - 1) * bytes_per_sector;
-  }
 
 
-  bool FAT::init(const char *mount_name)
-  {
-    TMachineSignalState mask;
-    MachineSuspendSignals(&mask);
-    OG_VMFileOpen(&mask, mount_name, O_RDWR, 600, &mount_fd);
-    MachineSuspendSignals(&mask);
-
-    if (mount_fd < 0)
-    {
-      MachineResumeSignals(&mask);
-      return false;
-    }
-
-    volatile int data_len = 512;
-    volatile unsigned char data[data_len];
-
-    void *data_ptr = (void*) &data;
-    int *data_len_ptr = (int*) &data_len;
-
-    TVMStatus res = OG_VMFileRead(&mask, mount_fd, data_ptr, data_len_ptr);
-    MachineSuspendSignals(&mask);
-
-    if (res != VM_STATUS_SUCCESS)
-    {
-      MachineResumeSignals(&mask);
-      return false;
-    }
-
-    // assert is FAT
-    if ((data[510] != 0x55) || (data[511] != 0xAA))
-    {
-      VMPrintError(
-        "Improperly formated FAT volume. \
-        According to FAT specs, values of volume[510] and volume[511] must \
-        be 0x55 and 0xAA. Mismatch. Not a FAT volume provided\n");
-      MachineResumeSignals(&mask);
-      return false;
-    }
-
-    bytes_per_sector = FAT::little_endian(data_ptr + 11, 2);
-    sectors_per_cluster = data[13];
-    reserved_sectors_count = FAT::little_endian(data_ptr + 14, 2);
-    fats_count = data[16];
-    root_entries_count = FAT::little_endian(data_ptr + 17, 2);
-
-    unsigned long total_sec_16 = FAT::little_endian(data_ptr + 19, 2);
-    unsigned long total_sec_32 = FAT::little_endian(data_ptr + 32, 4);
-    if ((total_sec_16 == 0) && (total_sec_32 == 0))
-    {
-      VMPrintError(
-        "Improperly formated FAT volume.\
-        Both BPB_TotSec32 or BPB_TotSec16 are 0. \
-        Exactly one must have positive value.\n");
-      MachineResumeSignals(&mask);
-      return false;
-    }
-    else if ((total_sec_16 != 0) && (total_sec_32 != 0))
-    {
-      VMPrintError(
-        "Improperly formated FAT volume. \
-        Both BPB_TotSec32 or BPB_TotSec16 are not 0. \
-        Exactly one must have positive value.\n");
-      MachineResumeSignals(&mask);
-      return false;
-    }
-    else if (total_sec_16 != 0)
-    {
-      total_sectors_count = total_sec_16;
-    }
-    else
-    {
-      total_sectors_count = total_sec_32;
-    }
-
-    media_value = data[21];
-    eof_value = (0xff << 8) + media_value;
-    sectors_per_fat = FAT::little_endian(data_ptr + 22, 2);
-    volume_serial_number = FAT::little_endian(data_ptr + 39, 4);
-    for (int i = 0; i < 11; i++)
-    {
-      volume_label[i] = data[43 + i];
-    }
-    volume_label[11] = '\0';
 
 
-    root_dir_sectors_count =
-      ((root_entries_count * 32) + (bytes_per_sector - 1)) / bytes_per_sector;
-
-    std::cout << ">> bytes_per_sector = " << bytes_per_sector << "\n";
-    std::cout << ">> sectors_per_cluster = " << sectors_per_cluster << "\n";
-    std::cout << ">> fats_count = " << fats_count << "\n";
-    std::cout << ">> root_entries_count = " << root_entries_count << "\n";
-    std::cout << ">> media_value = " << media_value << "\n";
-    std::cout << ">> sectors_per_fat = " << sectors_per_fat << "\n";
-    std::cout << ">> volume_serial_number = " << volume_serial_number << "\n";
-    std::cout << ">> volume_label = " << volume_label << "\n";
-    std::cout << ">> root_dir_sectors_count = " << root_dir_sectors_count << "\n";
-    std::cout << "-------------------------------------\n";
 
 
-    // read FAT table
-    // increase capacity:
-    // - num of sectors in 1 fat * bytes per sector / bytes per entry
-    int fat_size = sectors_per_fat * bytes_per_sector / 2;
-    fat.reserve(fat_size);
 
-    // go to the beginning of fat
-    int tmp = -1;
-    int fat_offset = get_offset_of_sector(get_first_sector_of_cluster(0));
-    res = OG_VMFileSeek(&mask, mount_fd, fat_offset, 0, &tmp);
-    MachineSuspendSignals(&mask);
-    if (res != VM_STATUS_SUCCESS)
-    {
-      MachineResumeSignals(&mask);
-      return false;
-    }
 
-    volatile int fat_data_len = sectors_per_fat * bytes_per_sector;
-    volatile unsigned char fat_data[fat_data_len];
-    void *fat_data_ptr = (void*) &fat_data;
-    int *fat_data_len_ptr = (int*) &fat_data_len;
 
-    res = OG_VMFileRead(&mask, mount_fd, fat_data_ptr, fat_data_len_ptr);
-    MachineSuspendSignals(&mask);
 
-    if (res != VM_STATUS_SUCCESS)
-    {
-      MachineResumeSignals(&mask);
-      return false;
-    }
-    for (int i = 0; i < fat_size; i++)
-    {
-      fat[i] = FAT::little_endian(fat_data_ptr + 2 * i, 2);
-    }
-    // assert 0xfff8 0xffff
-    if ((fat[0] != eof_value) || (fat[1] != 65535))
-    {
-      VMPrintError(
-        "Improperly formated FAT volume. \
-        First values in fat table are expected to be 0xff<BPB_Media> and 0xffff\n");
-      MachineResumeSignals(&mask);
-      return false;
-    }
 
-    // INIT ROOT DIRECTORY
-    tmp = -1;
-    int root_dir_offset = get_offset_of_sector(get_first_sector_of_cluster(1));
-    res = OG_VMFileSeek(&mask, mount_fd, root_dir_offset, 0, &tmp);
-    MachineSuspendSignals(&mask);
-    if (res != VM_STATUS_SUCCESS)
-    {
-      MachineResumeSignals(&mask);
-      return false;
-    }
 
-    int to_read_bytes = bytes_per_sector;
-    char buf[to_read_bytes];
-    for (int i = 0; i < to_read_bytes; i++)
-    {
-      buf[i] = '\0';
-    }
 
-    bool done = false;
-    res = VM_STATUS_SUCCESS;
-    for (int i = 0; !done && (i < root_dir_sectors_count); i++)
-    {
-      res = OG_VMFileRead(&mask, mount_fd, buf, &to_read_bytes);
-      MachineSuspendSignals(&mask);
 
-      if (res != VM_STATUS_SUCCESS)
-      {
-        break;
-      }
-
-      done = add_files_dirs_to_cur_path(buf, to_read_bytes);
-    }
-
-    if (res != VM_STATUS_SUCCESS)
-    {
-      MachineResumeSignals(&mask);
-      return false;
-    }
-
-    current_dir_cluster_number = 1;
-
-    MachineResumeSignals(&mask);
-    return true;
-  }
-
-  // @TODO: handle long paths; to test
-  void FAT::current_working_directory(char *abs_path)
-  {
-    abs_path[0] = '/';
-    int size = path.size();
-    int char_i = 1;
-
-    if (size > 0)
-    {
-      // iterate over each dir
-      for (int path_i = 0; path_i < size; path_i++)
-      {
-        // iterate over each char in the dir
-        for (int j = 0; j < path[path_i].length(); j++, char_i++)
-        {
-          abs_path[char_i] = path[path_i][j];
-        }
-      }
-    }
-    abs_path[char_i] = '\0';
-  }
 
   class GlobalState
   {
@@ -670,10 +393,11 @@ extern "C"
     std::map<TVMMutexID, Lock*> all_locks;
     TCB *cur_thread_ptr = NULL;
     MemoryManager *mem_mgr_ptr = NULL;
+    FatFS fat_fs;
 
     int tick_ms = 0;
     TVMTick current_time = 0;
-    FAT fat_fs;
+    // FAT fat_fs;
 
     ~GlobalState()
     {
@@ -918,6 +642,600 @@ extern "C"
     VMMutexRelease(mem_alloc_lock_id);
   }
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  // +
+  Directory::Directory(std::string pth, int real_f_d, int real_f_d_offset)
+  {
+    path = pth;
+    real_fd = real_f_d;
+    real_fd_offset = real_f_d_offset;
+
+    TVMStatus res = VMMutexCreate(&lock_id);
+    if (res != VM_STATUS_SUCCESS)
+    {
+      std::cout << "[Directory] Failed to create a lock in constructor\n";
+    }
+  }
+
+  // +
+  Directory::~Directory()
+  {
+    TVMStatus res = VMMutexDelete(lock_id);
+    if (res != VM_STATUS_SUCCESS)
+    {
+      std::cout << "[Directory] Failed to delete a lock in deconstructor\n";
+    }
+  }
+
+  // +
+  bool Directory::is_real_fd_access_allowed()
+  {
+    return !is_lock_free &&
+      (lock_owner_id == global_state.cur_thread_ptr -> get_thread_id());
+  }
+
+  // +
+  bool Directory::get_real_fd(int *fd)
+  {
+    if (!is_real_fd_access_allowed())
+    {
+      return false;
+    }
+
+    *fd = real_fd;
+    return true;
+  }
+
+  // +
+  bool Directory::get_real_fd_offset(int *fd_offset)
+  {
+    if (!is_real_fd_access_allowed())
+    {
+      return false;
+    }
+
+    *fd_offset = real_fd_offset;
+    return true;
+  }
+
+  // +
+  bool Directory::set_real_fd(int fd)
+  {
+    if (!is_real_fd_access_allowed())
+    {
+      return false;
+    }
+
+    real_fd = fd;
+    return true;
+  }
+
+  // +
+  bool Directory::set_real_fd_offset(int fd_offset)
+  {
+    if (!is_real_fd_access_allowed())
+    {
+      return false;
+    }
+
+    real_fd_offset = fd_offset;
+    return true;
+  }
+
+  // +
+  void Directory::acquire_lock(TMachineSignalStateRef mask_ptr)
+  {
+    TVMStatus res = OG_VMMutexAcquire(mask_ptr, lock_id, VM_TIMEOUT_INFINITE);
+    MachineSuspendSignals(mask_ptr);
+
+    if (res != VM_STATUS_SUCCESS)
+    {
+      std::cout << "[Directory] can't acquire_lock(). Status = " << res << ".\n";
+      return;
+    }
+
+    is_lock_free = false;
+    lock_owner_id = global_state.cur_thread_ptr -> get_thread_id();
+  }
+
+  // +
+  void Directory::release_lock(TMachineSignalStateRef mask_ptr)
+  {
+    if (is_real_fd_access_allowed())
+    {
+      is_lock_free = true;
+      lock_owner_id = 0;
+
+      TVMStatus res = OG_VMMutexRelease(mask_ptr, lock_id);
+      MachineSuspendSignals(mask_ptr);
+
+      if (res != VM_STATUS_SUCCESS)
+      {
+        std::cout << "[Directory] can't release_lock(). Status = " << res << ".\n";
+        return;
+      }
+    }
+  }
+
+
+
+
+
+
+
+
+
+
+  void FatFS::debug_print_bpb_metadata()
+  {
+    std::cout << "-----------------METADATA---------------------\n"
+      << "bytes_per_sector = " << bytes_per_sector << "\n"
+      << "reserved_sectors_count = " << reserved_sectors_count << "\n"
+      << "fats_count = " << (int) fats_count << "\n"
+      << "root_entries_count = " << root_entries_count << "\n"
+      << "sectors_per_cluster = " << (int) sectors_per_cluster << "\n"
+      << "total_sectors_count = " << total_sectors_count << "\n"
+      << "root_dir_sectors_count = " << root_dir_sectors_count << "\n"
+      << "media_value = " << media_value << "\n"
+      << "eof_value = " << eof_value << "\n"
+      << "sectors_per_fat = " << sectors_per_fat << "\n"
+      << "volume_serial_number = " << volume_serial_number << "\n"
+      << "volume_label = " << volume_label << "\n"
+      << "fat_size = " << fat_size << "\n"
+      << "----------------------------------------------\n";
+  }
+
+  // n = 0 -> fat array offset
+  // n = 1 -> root dir offset
+  // n >= 2 -> data offset
+  int FatFS::get_offset_of_cluster(int n)
+  {
+    int sector_index;
+
+    // fat
+    if (n == 0)
+    {
+      // sector index = 1
+      sector_index = reserved_sectors_count;
+    }
+    // root dir
+    else if (n == 1)
+    {
+      // sector index = 1 + (2 * 17) = 35
+      sector_index = reserved_sectors_count + (sectors_per_fat * fats_count);
+    }
+    // data
+    else
+    {
+      // sector index ~= 1 + (2 * 17) + 32 = 67
+      sector_index =
+        reserved_sectors_count +
+        (sectors_per_fat * fats_count) + root_dir_sectors_count +
+        sectors_per_cluster * (n - 2);
+    }
+
+    return sector_index * bytes_per_sector;
+  }
+
+
+
+  // +
+  bool FatFS::is_fat_array_access_allowed()
+  {
+    return !is_fat_lock_free &&
+      (fat_lock_owner_id == global_state.cur_thread_ptr -> get_thread_id());
+  }
+
+  // +
+  std::vector<uint32_t>* FatFS::get_fat_array()
+  {
+    if (!is_fat_array_access_allowed())
+    {
+      return NULL;
+    }
+
+    return &fat_arr;
+  }
+
+  // +
+  void FatFS::acquire_fat_lock(TMachineSignalStateRef mask_ptr)
+  {
+    TVMStatus res = OG_VMMutexAcquire(mask_ptr, fat_lock_id, VM_TIMEOUT_INFINITE);
+    MachineSuspendSignals(mask_ptr);
+
+    if (res != VM_STATUS_SUCCESS)
+    {
+      std::cout << "[FatFS] can't acquire_fat_lock(). Status = " << res << ".\n";
+      return;
+    }
+
+    is_fat_lock_free = false;
+    fat_lock_owner_id = global_state.cur_thread_ptr -> get_thread_id();
+  }
+
+  // +
+  void FatFS::release_fat_lock(TMachineSignalStateRef mask_ptr)
+  {
+    if (is_fat_array_access_allowed())
+    {
+      is_fat_lock_free = true;
+      fat_lock_owner_id = 0;
+
+      TVMStatus res = OG_VMMutexRelease(mask_ptr, fat_lock_id);
+      MachineSuspendSignals(mask_ptr);
+
+      if (res != VM_STATUS_SUCCESS)
+      {
+        std::cout << "[FatFS] can't release_fat_lock(). Status = " << res << ".\n";
+        return;
+      }
+    }
+  }
+
+
+  // +
+  bool FatFS::init_metadata(TMachineSignalStateRef mask_ptr)
+  {
+    if (cur_dir == NULL)
+    {
+      return false;
+    }
+
+    int cur_dir_fd = -1;
+    int tmp_cur_dir_offset = -1;
+
+    bool success = cur_dir -> get_real_fd(&cur_dir_fd);;
+    if (!success)
+    {
+      std::cout << "[FatFS] can't get cur dir fd [0]: didn't acquire lock\n";
+      return false;
+    }
+
+    TVMStatus res = OG_VMFileSeek(
+      mask_ptr, cur_dir_fd,
+      0, 0, &tmp_cur_dir_offset
+    );
+    MachineSuspendSignals(mask_ptr);
+
+    success = cur_dir -> set_real_fd_offset(tmp_cur_dir_offset);
+    if (!success)
+    {
+      std::cout
+        << "[FatFS] can't update cur dir fd offset [0]: didn't acquire lock\n";
+      return false;
+    }
+
+    if ((res != VM_STATUS_SUCCESS) || (tmp_cur_dir_offset != 0))
+    {
+      std::cout
+        << "[FatFS] can't init_metadata(): failed to seek to proper offset. "
+        << "Status = " << res << ". "
+        << "Offset (expected 0) = " << tmp_cur_dir_offset << ".\n";
+
+      return false;
+    }
+
+    // TRY TO READ FIRST 512 BYTES
+    int meta_length = 512;
+    uint8_t metadata[meta_length];
+
+    res = OG_VMFileRead(
+      mask_ptr, cur_dir_fd,
+      (void*) metadata, &meta_length
+    );
+    MachineSuspendSignals(mask_ptr);
+
+    if ((res != VM_STATUS_SUCCESS) || (meta_length != 512))
+    {
+      std::cout
+        << "[FatFS] can't init_metadata(): failed to read first 512 bytes. "
+        << "Status = " << res << ". "
+        << "Number of bytes read = " << meta_length << ".\n";
+      return false;
+    }
+
+    success = cur_dir -> set_real_fd_offset(meta_length);
+    if (!success)
+    {
+      std::cout
+        << "[FatFS] can't update cur dir fd offset [1]: didn't acquire lock\n";
+      return false;
+    }
+
+    // PROCESS FIRST 512 BYTES
+
+    // assert is FAT
+    if ((metadata[510] != 0x55) || (metadata[511] != 0xAA))
+    {
+      // VMPrintError(
+        // "[FatFS] Improperly formated FAT volume. \
+        // According to FAT specs, values of volume[510] and volume[511] must \
+        // be 0x55 and 0xAA. Mismatch. Not a FAT volume provided\n");
+      std::cout
+        << "Improperly formated FAT volume. "
+        << "According to FAT specs, values of volume[510] and volume[511] must "
+        << "be 0x55 and 0xAA. Mismatch. Not a FAT volume provided\n";
+      return false;
+    }
+
+    TO_LITTLE_ENDIAN_INT(metadata + 11, 2, (void*) &bytes_per_sector, 3);
+    TO_LITTLE_ENDIAN_INT(metadata + 13, 1, (void*) &sectors_per_cluster, 1);
+    TO_LITTLE_ENDIAN_INT(metadata + 14, 2, (void*) &reserved_sectors_count, 3);
+    TO_LITTLE_ENDIAN_INT(metadata + 16, 1, (void*) &fats_count, 1);
+    TO_LITTLE_ENDIAN_INT(metadata + 17, 2, (void*) &root_entries_count, 3);
+
+
+    // TOTAL SECTORS COUNT
+    uint16_t total_sec_16;
+    uint32_t total_sec_32;
+    TO_LITTLE_ENDIAN_INT(metadata + 19, 2, (void*) &total_sec_16, 3);
+    TO_LITTLE_ENDIAN_INT(metadata + 32, 4, (void*) &total_sec_32, 5);
+    if ((total_sec_16 == 0) && (total_sec_32 == 0))
+    {
+      // VMPrintError(
+      //   "[FatFS] Improperly formated FAT volume. \
+      //   Both BPB_TotSec32 or BPB_TotSec16 are 0. \
+      //   Exactly one must have positive value.\n");
+
+      std::cout
+        << "[FatFS] Improperly formated FAT volume. "
+        << "Both BPB_TotSec32 or BPB_TotSec16 are 0. "
+        << "Exactly one must have positive value.\n";
+      return false;
+    }
+    else if ((total_sec_16 != 0) && (total_sec_32 != 0))
+    {
+      // VMPrintError(
+      //   "[FatFS]  Improperly formated FAT volume. \
+      //   Both BPB_TotSec32 or BPB_TotSec16 are not 0. \
+      //   Exactly one must have positive value.\n");
+
+      std::cout
+        << "[FatFS]  Improperly formated FAT volume. "
+        << "Both BPB_TotSec32 or BPB_TotSec16 are not 0. "
+        << "Exactly one must have positive value.\n";
+      return false;
+    }
+    else
+    {
+      total_sectors_count = total_sec_16 > 0 ? total_sec_16 : total_sec_32;
+    }
+
+    // LEFTOVER VALUES
+    TO_LITTLE_ENDIAN_INT(metadata + 21, 1, (void*) &media_value, 1);
+    TO_LITTLE_ENDIAN_INT(metadata + 22, 2, (void*) &sectors_per_fat, 3);
+    TO_LITTLE_ENDIAN_INT(metadata + 39, 4, (void*) &volume_serial_number, 5);
+
+    eof_value = 0xff;
+    eof_value = (eof_value << 8) + media_value;
+    volume_label = std::string( ((char*) metadata) + 43, 11);
+
+    fat_size = sectors_per_fat * bytes_per_sector / 2;
+
+    root_dir_sectors_count =
+      ((root_entries_count * 32) + (bytes_per_sector - 1)) / bytes_per_sector;
+    return true;
+  }
+
+
+  // +
+  bool FatFS::init_fat_array(TMachineSignalStateRef mask_ptr)
+  {
+
+    auto fat_array = get_fat_array();
+    int cur_dir_fd = -1;
+    int tmp_cur_dir_offset = -1;
+
+    if (fat_array == NULL)
+    {
+      std::cout << "[FatFS] can't get fat array: didn't acquire lock\n";
+      return false;
+    }
+
+    bool success = cur_dir -> get_real_fd(&cur_dir_fd);;
+    if (!success)
+    {
+      std::cout << "[FatFS] can't get cur dir fd [3]: didn't acquire lock\n";
+      return false;
+    }
+
+    int fat_offset = get_offset_of_cluster(0);
+    TVMStatus res = OG_VMFileSeek(
+      mask_ptr, cur_dir_fd,
+      fat_offset, 0, &tmp_cur_dir_offset
+    );
+    MachineSuspendSignals(mask_ptr);
+
+    success = cur_dir -> set_real_fd_offset(tmp_cur_dir_offset);
+    if (!success)
+    {
+      std::cout
+        << "[FatFS] can't update cur dir fd offset [4]: didn't acquire lock\n";
+      return false;
+    }
+
+    if ((res != VM_STATUS_SUCCESS) || (tmp_cur_dir_offset != fat_offset))
+    {
+      std::cout
+        << "[FatFS] can't init_fat_array(): failed to seek to proper offset. "
+        << "Status = " << res << ". "
+        << "Offset (expected " << fat_offset
+        << ") = " << tmp_cur_dir_offset << ".\n";
+
+      return false;
+    }
+
+    fat_array -> reserve(fat_size);
+
+    int fat_buffer_len = sectors_per_fat * bytes_per_sector;
+    int num_bytes_read = fat_buffer_len;
+    uint8_t fat_buffer[fat_buffer_len];
+
+    res = OG_VMFileRead(
+      mask_ptr, cur_dir_fd,
+      (void*) fat_buffer, &num_bytes_read
+    );
+
+    MachineSuspendSignals(mask_ptr);
+
+    if ((res != VM_STATUS_SUCCESS) || (num_bytes_read != fat_buffer_len))
+    {
+      std::cout
+        << "[FatFS] can't init_fat_array(): failed to read fat array. "
+        << "Status = " << res << ". "
+        << "Expected num of bytes = " << fat_buffer_len << ". "
+        << "Number of bytes actually read = " << num_bytes_read << ".\n";
+      return false;
+    }
+
+    success = cur_dir -> set_real_fd_offset(fat_buffer_len + tmp_cur_dir_offset);
+    if (!success)
+    {
+      std::cout
+        << "[FatFS] can't update cur dir fd offset [5]: didn't acquire lock\n";
+      return false;
+    }
+
+    // STORE FAT VALUES
+    for (uint32_t i = 0; i < fat_size; i++)
+    {
+      uint32_t fat_val = 0;
+      TO_LITTLE_ENDIAN_INT(fat_buffer + 2 * i, 2, (void*) &fat_val, 5);
+      (*fat_array)[i] = fat_val;
+    }
+
+    // assert 0xfff8 0xffff
+    if (((*fat_array)[0] != eof_value) || ((*fat_array)[1] != 65535))
+    {
+      std::cout
+        << "Improperly formated FAT volume. "
+        << "First values in fat table are expected to be "
+        << "0xff<BPB_Media> and 0xffff\n";
+
+      return false;
+    }
+
+    return true;
+  }
+
+
+  // +
+  // @TODO: delete dynamically created new Directory
+  bool FatFS::init(const char *mount_name_ptr)
+  {
+    if (mount_name_ptr == NULL)
+    {
+      std::cout << "[FatFS] can't init(): mount_name_ptr is NULL\n";
+      return false;
+    }
+
+    TMachineSignalState mask;
+    MachineSuspendSignals(&mask);
+
+    int fd = -1;
+    mount_name = mount_name_ptr;
+
+    TVMStatus res = OG_VMFileOpen(&mask, mount_name.c_str(), O_RDWR, 600, &fd);
+    MachineSuspendSignals(&mask);
+
+    if (res != VM_STATUS_SUCCESS)
+    {
+      std::cout
+        << "[FatFS] can't init(): failed to open mount file. Status = "
+        << res
+        << "\n";
+
+      MachineResumeSignals(&mask);
+      return false;
+    }
+
+    cur_dir = new Directory("/", fd, 0);
+    cur_dir -> acquire_lock(&mask);
+
+    res = VMMutexCreate(&fat_lock_id);
+    if (res != VM_STATUS_SUCCESS)
+    {
+      std::cout << "[FatFS] Failed to create a fat array lock\n";
+      cur_dir -> release_lock(&mask);
+      return false;
+    }
+    acquire_fat_lock(&mask);
+    // @TODO: release locks everywhere
+
+    bool success = init_metadata(&mask);
+    if (!success)
+    {
+      std::cout << "[FatFS] can't init(): failed to init metadata\n";
+      MachineResumeSignals(&mask);
+      return false;
+    }
+
+    success = init_fat_array(&mask);
+
+    if (!success)
+    {
+      std::cout << "[FatFS] can't init(): failed to init FAR array\n";
+      MachineResumeSignals(&mask);
+      return false;
+    }
+
+    return false;
+  }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
   // +
   TVMStatus VMStart(int tickms, TVMMemorySize sharedsize, const char *mount, int argc, char *argv[])
   {
@@ -950,7 +1268,7 @@ extern "C"
       return VM_STATUS_FAILURE;
     }
 
-    fnEntry(argc, argv);
+    // fnEntry(argc, argv);
 
     MachineTerminate();
     VMUnloadModule();
@@ -1211,37 +1529,6 @@ extern "C"
   }
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   Lock::Lock()
   {
     TMachineSignalState signal_mask_state;
@@ -1389,14 +1676,11 @@ extern "C"
     }
   }
 
-  TVMStatus VMMutexCreate(TVMMutexIDRef mutexref)
+  TVMStatus OG_VMMutexCreate(TMachineSignalStateRef mask, TVMMutexIDRef mutexref)
   {
-    TMachineSignalState signal_mask_state;
-    MachineSuspendSignals(&signal_mask_state);
-
     if (mutexref == NULL)
     {
-      MachineResumeSignals(&signal_mask_state);
+      MachineResumeSignals(mask);
       return VM_STATUS_ERROR_INVALID_PARAMETER;
     }
 
@@ -1404,44 +1688,50 @@ extern "C"
     *mutexref = lock -> get_id();
     global_state.all_locks[*mutexref] = lock;
 
-    MachineResumeSignals(&signal_mask_state);
+    MachineResumeSignals(mask);
     return VM_STATUS_SUCCESS;
   }
-
-  TVMStatus VMMutexDelete(TVMMutexID mutex)
+  TVMStatus VMMutexCreate(TVMMutexIDRef mutexref)
   {
-    TMachineSignalState signal_mask_state;
-    MachineSuspendSignals(&signal_mask_state);
+    TMachineSignalState mask;
+    MachineSuspendSignals(&mask);
+    return OG_VMMutexCreate(&mask, mutexref);
+  }
 
+  TVMStatus OG_VMMutexDelete(TMachineSignalStateRef mask, TVMMutexID mutex)
+  {
     Lock *lock_ptr = global_state.all_locks[mutex];
 
     if (lock_ptr == NULL)
     {
-      MachineResumeSignals(&signal_mask_state);
+      MachineResumeSignals(mask);
       return VM_STATUS_ERROR_INVALID_ID;
     }
 
     if (!(lock_ptr -> is_free()))
     {
-      MachineResumeSignals(&signal_mask_state);
+      MachineResumeSignals(mask);
       return VM_STATUS_ERROR_INVALID_STATE;
     }
 
     delete lock_ptr;
     global_state.all_locks.erase(mutex);
 
-    MachineResumeSignals(&signal_mask_state);
+    MachineResumeSignals(mask);
     return VM_STATUS_SUCCESS;
   }
-
-  TVMStatus VMMutexQuery(TVMMutexID mutex, TVMThreadIDRef ownerref)
+  TVMStatus VMMutexDelete(TVMMutexID mutex)
   {
-    TMachineSignalState signal_mask_state;
-    MachineSuspendSignals(&signal_mask_state);
+    TMachineSignalState mask;
+    MachineSuspendSignals(&mask);
+    return OG_VMMutexDelete(&mask, mutex);
+  }
 
+  TVMStatus OG_VMMutexQuery(TMachineSignalStateRef mask, TVMMutexID mutex, TVMThreadIDRef ownerref)
+  {
     if (ownerref == NULL)
     {
-      MachineResumeSignals(&signal_mask_state);
+      MachineResumeSignals(mask);
       return VM_STATUS_ERROR_INVALID_PARAMETER;
     }
 
@@ -1449,7 +1739,7 @@ extern "C"
 
     if (lock_ptr == NULL)
     {
-      MachineResumeSignals(&signal_mask_state);
+      MachineResumeSignals(mask);
       return VM_STATUS_ERROR_INVALID_ID;
     }
 
@@ -1457,54 +1747,66 @@ extern "C"
       lock_ptr -> get_owner_thread() -> get_thread_id();
 
 
-    MachineResumeSignals(&signal_mask_state);
+    MachineResumeSignals(mask);
     return VM_STATUS_SUCCESS;
   }
-
-  TVMStatus VMMutexAcquire(TVMMutexID mutex, TVMTick timeout)
+  TVMStatus VMMutexQuery(TVMMutexID mutex, TVMThreadIDRef ownerref)
   {
-    TMachineSignalState signal_mask_state;
-    MachineSuspendSignals(&signal_mask_state);
+    TMachineSignalState mask;
+    MachineSuspendSignals(&mask);
+    return OG_VMMutexQuery(&mask, mutex, ownerref);
+  }
 
+  TVMStatus OG_VMMutexAcquire(TMachineSignalStateRef mask, TVMMutexID mutex, TVMTick timeout)
+  {
     Lock *lock_ptr = global_state.all_locks[mutex];
 
     if (lock_ptr == NULL)
     {
-      MachineResumeSignals(&signal_mask_state);
+      MachineResumeSignals(mask);
       return VM_STATUS_ERROR_INVALID_ID;
     }
 
-    if (!(lock_ptr -> acquire(timeout, &signal_mask_state)))
+    if (!(lock_ptr -> acquire(timeout, mask)))
     {
       return VM_STATUS_FAILURE;
     }
 
     return VM_STATUS_SUCCESS;
   }
-
-  TVMStatus VMMutexRelease(TVMMutexID mutex)
+  TVMStatus VMMutexAcquire(TVMMutexID mutex, TVMTick timeout)
   {
-    TMachineSignalState signal_mask_state;
-    MachineSuspendSignals(&signal_mask_state);
+    TMachineSignalState mask;
+    MachineSuspendSignals(&mask);
+    return OG_VMMutexAcquire(&mask, mutex, timeout);
+  }
 
+  TVMStatus OG_VMMutexRelease(TMachineSignalStateRef mask, TVMMutexID mutex)
+  {
     Lock *lock_ptr = global_state.all_locks[mutex];
 
     if (lock_ptr == NULL)
     {
-      MachineResumeSignals(&signal_mask_state);
+      MachineResumeSignals(mask);
       return VM_STATUS_ERROR_INVALID_ID;
     }
 
     if (lock_ptr -> get_owner_thread() != global_state.cur_thread_ptr)
     {
-      MachineResumeSignals(&signal_mask_state);
+      MachineResumeSignals(mask);
       return VM_STATUS_ERROR_INVALID_STATE;
     }
 
     lock_ptr -> release();
 
-    MachineResumeSignals(&signal_mask_state);
+    MachineResumeSignals(mask);
     return VM_STATUS_SUCCESS;
+  }
+  TVMStatus VMMutexRelease(TVMMutexID mutex)
+  {
+    TMachineSignalState mask;
+    MachineSuspendSignals(&mask);
+    return OG_VMMutexRelease(&mask, mutex);
   }
 
 
@@ -1514,116 +1816,198 @@ extern "C"
 
 
 
-  // -+
-  // @TODO: expect short names only
-  // @TODO: implement mode and flags
-  // @TODO: implement absolute paths
-  // @TODO: implement relative subdirs
-  // @TODO: check errors
-  // @TODO: implement long names
-  // modes, flags ignored
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  // -
   TVMStatus VMFileOpen(const char *filename, int flags, int mode, int *filedescriptor)
   {
-    // possible flags
-    // O_RDONLY, O_WRONLY, or O_RDWR
-
-    TMachineSignalState signal_mask_state;
-    MachineSuspendSignals(&signal_mask_state);
+    TMachineSignalState mask;
+    MachineSuspendSignals(&mask);
 
     if ((filedescriptor == NULL) || (filename == NULL))
     {
-      MachineResumeSignals(&signal_mask_state);
+      MachineResumeSignals(&mask);
       return VM_STATUS_ERROR_INVALID_PARAMETER;
     }
 
-    TVMStatus res = VMFileSystemValidPathName(filename);
+    // MachineResumeSignals(&mask);
+    // return VM_STATUS_FAILURE;
 
-    if (res != VM_STATUS_SUCCESS)
-    {
-      MachineResumeSignals(&signal_mask_state);
-      return res;
-    }
-
-    char short_name[13] = {
-      '\0', '\0', '\0', '\0', '\0', '\0',
-      '\0', '\0', '\0', '\0', '\0', '\0', '\0'};
-
-
-    for (int i = 0; (i < 13) && (filename[i] != '\0'); i++)
-    {
-      short_name[i] = std::toupper(filename[i]);
-    }
-
-    std::string short_name_key(short_name);
-
-    auto iter = global_state.fat_fs.current_dir_items.find(short_name_key);
-    bool is_key_present = iter != global_state.fat_fs.current_dir_items.end();
-
-    if (!is_key_present)
-    {
-      std::cout << "FILE with short name '" << short_name_key << "' not found\n";
-      std::cout << "TO IMPLEMENT\n";
-      MachineResumeSignals(&signal_mask_state);
-      return VM_STATUS_FAILURE;
-    }
-
-    DirItem *item_ptr = &(global_state.fat_fs.current_dir_items[short_name_key]);
-
-    std::cout << "FOUND: " << item_ptr -> short_name << " cluster: " << item_ptr -> first_cluster_number << "\n";
-
-    int new_fd = global_state.fat_fs.get_next_fd();
-
-    FdDescription desc;
-    auto sector =
-      global_state.fat_fs.get_first_sector_of_cluster(item_ptr -> first_cluster_number);
-
-    desc.mount_vol_offset = global_state.fat_fs.get_offset_of_sector(sector);
-    desc.bytes_processed_total = 0;
-    desc.bytes_processed_this_cluster = 0;
-    desc.dir_item_ptr = item_ptr;
-    desc.cur_cluster_num = item_ptr -> first_cluster_number;
-
-    *filedescriptor = new_fd;
-    global_state.fat_fs.fds[new_fd] = desc;
-
-    MachineResumeSignals(&signal_mask_state);
+    // -----------------------------------------------------------
+    // std::cout << "[VMFileOpen] OG Filename = '" << filename << "'\n";
+    //
+    // TVMStatus res = VMFileSystemValidPathName(filename);
+    // if (res != VM_STATUS_SUCCESS)
+    // {
+    //   MachineResumeSignals(&mask);
+    //   return VM_STATUS_FAILURE;
+    // }
+    //
+    // char absolute_path[128];
+    //
+    // res = VMFileSystemGetAbsolutePath(
+    //   absolute_path,
+    //   // @TODO: implement
+    //   global_state.fat_fs.cur_work_dir_path().c_str(),
+    //   filename
+    // );
+    //
+    // if (res != VM_STATUS_SUCCESS)
+    // {
+    //   MachineResumeSignals(&mask);
+    //   return VM_STATUS_FAILURE;
+    // }
+    //
+    // char cur_fname[128];
+    // char cur_path[128];
+    //
+    // res = VMFileSystemDirectoryFromFullPath(cur_path, absolute_path);
+    // if (res != VM_STATUS_SUCCESS)
+    // {
+    //   MachineResumeSignals(&mask);
+    //   return VM_STATUS_FAILURE;
+    // }
+    //
+    // res = VMFileSystemFileFromFullPath(cur_fname, absolute_path);
+    // if (res != VM_STATUS_SUCCESS)
+    // {
+    //   MachineResumeSignals(&mask);
+    //   return VM_STATUS_FAILURE;
+    // }
+    //
+    //
+    // std::cout << "[VMFileOpen] fname = '" << cur_fname << "' path = '" << cur_path << "'\n";
+    // // @TODO: implement
+    // Directory *cur_dir = global_state.fat_fs.get_directory(cur_path);
+    //
+    // if (cur_dir == NULL)
+    // {
+    //   std::cout << "[VMFileOpen] Failed to navigate to path\n";
+    //   MachineResumeSignals(&mask);
+    //   return VM_STATUS_FAILURE;
+    // }
+    //
+    //
+    // // @TODO: implement; check if if will always be present
+    // TVMMutexIDRef cur_dir_lock_id = cur_dir -> get_lock_id();
+    // OG_VMMutexAcquire(&mask, *cur_dir_lock_id, VM_TIMEOUT_INFINITE);
+    // MachineSuspendSignals(&mask);
+    //
+    // // https://man7.org/linux/man-pages/man2/open.2.html
+    // // O_CREAT | O_TRUNC | O_RDWR, 0644,
+    // // O_RDONLY, 0644,
+    // // must flag must include one of: O_RDONLY, O_WRONLY, or O_RDWR.
+    // // Additional:
+    // // O_CREAT - If pathname does not exist, create it as a regular file.
+    // // O_TRUNC - if pathname exists, is a regular file, access mode allows writing (is O_RDWR or O_WRONLY)
+    // // it will be truncated to length 0
+    // // mode: user, group, others
+    // // 400 - read, 200 - write, 100 - execute
+    //
+    //
+    // std::cout << "[VmFileOpen] Processing Flags '" << flags << "' and Mode: '" << mode << "'\n";
+    //
+    // bool can_read = false;
+    // bool can_write = false;
+    // bool file_must_already_exist = true;
+    // bool to_clear_file = false;
+    //
+    // if ((flags & O_RDWR) == O_RDWR)
+    // {
+    //   std::cout << "can read and write\n";
+    //   can_read = true;
+    //   can_write = true;
+    // }
+    // else if ((flags & O_WRONLY) == O_WRONLY)
+    // {
+    //   std::cout << "write only\n";
+    //   can_write = true;
+    // }
+    // else if ((flags & O_RDONLY) == O_RDONLY)
+    // {
+    //   std::cout << "read only\n";
+    //   can_read = true;
+    // }
+    //
+    // if (!can_read && !can_write)
+    // {
+    //   std::cout << "[VMFileOpen] Invalid flags passed '" << flags << "'\n";
+    //   OG_VMMutexRelease(&mask, *cur_dir_lock_id);
+    //   return VM_STATUS_FAILURE;
+    // }
+    //
+    // if ((flags & O_TRUNC) == O_TRUNC)
+    // {
+    //   to_clear_file = true;
+    // }
+    //
+    // if ((flags & O_CREAT) == O_CREAT)
+    // {
+    //   file_must_already_exist = false;
+    // }
+    //
+    // std::cout << "[VMFileOpen] Flags:\n" <<
+    //   "can_read = " << can_read << "\n" <<
+    //   "can_write = " << can_write << "\n" <<
+    //   "file_must_already_exist = " << file_must_already_exist << "\n" <<
+    //   "to_clear_file = " << to_clear_file << "\n";
+    //
+    //
+    //
+    //
+    //
+    //
+    // OG_VMMutexRelease(&mask, *cur_dir_lock_id);
     return VM_STATUS_SUCCESS;
   }
 
-  // -+
+  // -
   TVMStatus VMFileClose(int filedescriptor)
   {
-    TMachineSignalState signal_mask_state;
-    MachineSuspendSignals(&signal_mask_state);
+    TMachineSignalState mask;
+    MachineSuspendSignals(&mask);
 
     if ((filedescriptor >= 0) && (filedescriptor <= 2))
     {
-      return OG_VMFileClose(&signal_mask_state, filedescriptor);
+      return OG_VMFileClose(&mask, filedescriptor);
     }
 
-    MachineResumeSignals(&signal_mask_state);
+    std::cout << ">> [VMFileClose] Error. File Descriptor: " << filedescriptor << "\n";
+
+    MachineResumeSignals(&mask);
     return VM_STATUS_FAILURE;
   }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  // +--
-  // @TODO: fix total num read
-  // @TODO: manage size
+  // -
   TVMStatus VMFileRead(int filedescriptor, void *data, int *length)
   {
     TMachineSignalState mask;
@@ -1634,264 +2018,103 @@ extern "C"
       return OG_VMFileRead(&mask, filedescriptor, data, length);
     }
 
-    FdDescription *fd_desc = &(global_state.fat_fs.fds[filedescriptor]);
-    int expected_total_bytes = *length;
-    int bytes_until_eof =
-      fd_desc -> dir_item_ptr -> size - fd_desc -> bytes_processed_total;
-    if (expected_total_bytes > bytes_until_eof)
-    {
-      expected_total_bytes = bytes_until_eof;
-    }
-
-    int total_bytes_read_in_this_read_call = 0;
-    bool is_failure = false;
-    bool is_last_read = false;
-
-    do
-    {
-      if (expected_total_bytes == 0)
-      {
-        is_last_read = true;
-        break;
-      }
-
-      // Navigation
-      // @TODO: handle end of file: 0xffff
-      if (fd_desc -> bytes_processed_this_cluster == 1024)
-      {
-        auto next_cluster_num =
-          global_state.fat_fs.fat[fd_desc -> cur_cluster_num];
-        // if no next cluster??
-
-        fd_desc -> bytes_processed_this_cluster = 0;
-        fd_desc -> cur_cluster_num = next_cluster_num;
-
-        auto sector =
-          global_state.fat_fs.get_first_sector_of_cluster(next_cluster_num);
-
-        fd_desc -> mount_vol_offset =
-          global_state.fat_fs.get_offset_of_sector(sector);
-      }
-
-      auto cluster_offset = fd_desc -> mount_vol_offset +
-        fd_desc -> bytes_processed_this_cluster;
-
-      // what if it doesn't work?
-      // @TODO: to consider
-      int new_offset = -1;
-      OG_VMFileSeek(
-        &mask,
-        global_state.fat_fs.mount_fd,
-        cluster_offset,
-        0,
-        &new_offset
-      );
-      MachineSuspendSignals(&mask);
-
-      // @TODO ?????
-      if (new_offset != cluster_offset)
-      {
-        std::cout << "[READ] OFFSETS ARE DIFFEREENT: " <<
-          new_offset << " " << cluster_offset << "\n";
-      }
-
-
-      // @TODO remove 1024
-      int cluster_bytes_left = 1024 - fd_desc -> bytes_processed_this_cluster;
-      int to_read_bytes = expected_total_bytes - total_bytes_read_in_this_read_call;
-
-      if (to_read_bytes > cluster_bytes_left)
-      {
-        to_read_bytes = cluster_bytes_left;
-      }
-      else
-      {
-        is_last_read = true;
-      }
-
-      TVMStatus res = OG_VMFileRead(
-        &mask,
-        global_state.fat_fs.mount_fd,
-        data + total_bytes_read_in_this_read_call,
-        &to_read_bytes
-      );
-      MachineSuspendSignals(&mask);
-
-      if (res != VM_STATUS_SUCCESS)
-      {
-        is_failure = true;
-      }
-
-      total_bytes_read_in_this_read_call += to_read_bytes;
-      fd_desc -> bytes_processed_this_cluster += to_read_bytes;
-      fd_desc -> bytes_processed_total += to_read_bytes;
-      fd_desc -> mount_vol_offset += to_read_bytes;
-
-    }
-    while(!is_last_read && !is_failure);
-
-    // @TODO: wrong
-    *length = total_bytes_read_in_this_read_call;
-
-
-    if (is_failure)
-    {
-      MachineResumeSignals(&mask);
-      return VM_STATUS_FAILURE;
-    }
+    std::cout << ">> [VMFileRead] Error. File Descriptor: " << filedescriptor << "\n";
 
     MachineResumeSignals(&mask);
-    return VM_STATUS_SUCCESS;
-
-
-
-
-
-
-
-
-
-
-    //
-    //
-    //
-    //
-    //
-
-
-    // TVMStatus OG_VMFileSeek(TMachineSignalStateRef mask, int filedescriptor, int offset, int whence, int *newoffset)
-
-
-    // have a while loop?
-    // int new_offset = -1;
-    // OG_VMFileSeek(
-    //   &signal_mask_state,
-    //   global_state.fat_fs.mount_fd,
-    //   fd_desc -> mount_vol_offset + fd_desc -> bytes_processed_this_cluster,
-    //   0,
-    //   &new_offset
-    // );
-    // MachineSuspendSignals(&signal_mask_state);
-    //
-    // if (new_offset != (fd_desc -> mount_vol_offset + fd_desc -> bytes_processed_this_cluster))
-    // {
-    //   std::cout << "[READ] OFFSETS ARE DIFFEREENT: " << new_offset << " " << (fd_desc -> mount_vol_offset + fd_desc -> bytes_processed_this_cluster) << "\n";
-    // }
-
-    // auto cluster_bytes_left = 1024 - fd_desc -> bytes_processed_this_cluster;
-    // auto to_read_bytes = cluster_bytes_left >= *length ?
-    //   *length: cluster_bytes_left;
-
-
-
-    // OG_VMFileRead(
-    //   &signal_mask_state,
-    //   global_state.fat_fs.mount_fd,
-    //   data,
-    //   &to_read_bytes
-    // );
-    // MachineSuspendSignals(&signal_mask_state);
-    // fd_desc -> bytes_processed_this_cluster += to_read_bytes;
-    // fd_desc -> bytes_processed_total += to_read_bytes;
-    //
-    // *length = to_read_bytes;
-
-
-
-    // navigate
-    // @TODO: remove hardcoding
-    // @TODO: generalize for root dir
-    // if (fd_desc -> bytes_processed_this_cluster == 1024)
-    // {
-    //   fd_desc -> bytes_processed_this_cluster = 0;
-    //
-    //   auto next_cluster_num = global_state.fat_fs.fat[fd_desc -> cur_cluster_num];
-    //   fd_desc -> cur_cluster_num = next_cluster_num;
-    //
-    //   auto sector =
-    //     global_state.fat_fs.get_first_sector_of_cluster(next_cluster_num);
-    //
-    //   fd_desc -> mount_vol_offset = global_state.fat_fs.get_offset_of_sector(sector);
-    // }
-
-
-    // MachineResumeSignals(&signal_mask_state);
-    // return VM_STATUS_SUCCESS;
+    return VM_STATUS_FAILURE;
   }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  // -+
+  // -
   TVMStatus VMFileWrite(int filedescriptor, void *data, int *length)
   {
-    TMachineSignalState signal_mask_state;
-    MachineSuspendSignals(&signal_mask_state);
+    TMachineSignalState mask;
+    MachineSuspendSignals(&mask);
 
     if ((filedescriptor >= 0) && (filedescriptor <= 2))
     {
-      return OG_VMFileWrite(&signal_mask_state, filedescriptor, data, length);
+      return OG_VMFileWrite(&mask, filedescriptor, data, length);
     }
 
     std::cout << ">> [VMFileWrite] Error. File Descriptor: " << filedescriptor << "\n";
 
-    MachineResumeSignals(&signal_mask_state);
+    MachineResumeSignals(&mask);
     return VM_STATUS_FAILURE;
   }
+
+  // -
+  TVMStatus VMFileSeek(int filedescriptor, int offset, int whence, int *newoffset)
+  {
+    TMachineSignalState mask;
+    MachineSuspendSignals(&mask);
+
+    if ((filedescriptor >= 0) && (filedescriptor <= 2))
+    {
+      return OG_VMFileSeek(&mask, filedescriptor, offset, whence, newoffset);
+    }
+
+    std::cout << ">> [VMFileSeek] Error. File Descriptor: " << filedescriptor << "\n";
+
+    MachineResumeSignals(&mask);
+    return VM_STATUS_FAILURE;
+  }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -1951,19 +2174,13 @@ extern "C"
     MachineFileOpen(filename, flags, mode, OG_FileCB, arg_ptr);
     schedule_threads(mask);
 
-    std::cout << ">> FINISHED OPEN\n";
-
     if (arg.result < 0)
     {
-      std::cout << ">> ERR\n";
       return VM_STATUS_FAILURE;
     }
 
     *filedescriptor = arg.result;
-
-    std::cout << *filedescriptor << '\n';
     return VM_STATUS_SUCCESS;
-
   }
 
   // +
@@ -2175,70 +2392,6 @@ extern "C"
       *newoffset = arg.result;
     }
 
-    return VM_STATUS_SUCCESS;
-  }
-
-
-
-
-
-  TVMStatus VMDirectoryOpen(const char *dirname, int *dirdescriptor)
-  {
-    return VM_STATUS_FAILURE;
-  }
-
-
-  // +-
-  // @TODO: locks?
-  TVMStatus VMDirectoryCurrent(char *abspath)
-  {
-    TMachineSignalState signal_mask_state;
-    MachineSuspendSignals(&signal_mask_state);
-
-    if (abspath == NULL)
-    {
-      MachineResumeSignals(&signal_mask_state);
-      return VM_STATUS_ERROR_INVALID_PARAMETER;
-    }
-
-    global_state.fat_fs.current_working_directory(abspath);
-    std::cout << "HERE\n";
-
-    MachineResumeSignals(&signal_mask_state);
-    return VM_STATUS_SUCCESS;
-  }
-
-  /*
-  - Support cur dir changes
-  - Support cur dir multiple layer changes
-  - Support many layer changes
-  - Support all possible file names
-  */
-  TVMStatus VMDirectoryChange(const char *path)
-  {
-    TMachineSignalState signal_mask_state;
-    MachineSuspendSignals(&signal_mask_state);
-
-    if (path == NULL)
-    {
-      MachineResumeSignals(&signal_mask_state);
-      return VM_STATUS_ERROR_INVALID_PARAMETER;
-    }
-
-    // Step 1: check if matches any short dir
-    // - Create Short File Name version: UPPER CASE
-    // - If multiple short file names match, navigate to 1st one
-    // Step 2:
-    // - Create Long File Name key (lower case)
-    // - Check if any match
-    // - if some match, navigate
-    // - if no match, error
-
-    std::cout << path << "\n";
-
-    // return VM_STATUS_FAILURE
-
-    MachineResumeSignals(&signal_mask_state);
     return VM_STATUS_SUCCESS;
   }
 }
