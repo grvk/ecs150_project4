@@ -29,6 +29,8 @@ extern "C"
   TVMStatus OG_VMMutexAcquire(TMachineSignalStateRef mask, TVMMutexID mutex, TVMTick timeout);
   TVMStatus OG_VMMutexRelease(TMachineSignalStateRef mask, TVMMutexID mutex);
 
+  void VMStringCopy(char *dest, const char *src);
+
   struct SkeletonArgs
   {
     TVMThreadEntry fn;
@@ -161,6 +163,83 @@ extern "C"
 
 
 
+  uint16_t DAY_MASK    = 0b0000000000011111;
+  uint16_t MONTH_MASK  = 0b0000000111100000;
+  uint16_t YEAR_MASK   = 0b1111111000000000;
+  uint8_t  MONTH_SHIFT = 5;
+  uint8_t  YEAR_SHIFT  = 5;
+  uint16_t YEAR_OFFSET = 1980;
+
+  uint16_t HOURS_MASK    = 0b1111100000000000;
+  uint16_t MINUTES_MASK  = 0b0000011111100000;
+  uint16_t SECONDS_MASK  = 0b0000000000011111;
+  uint8_t  HOURS_SHIFT   = 11;
+  uint8_t  MINUTES_SHIFT = 5;
+
+
+  void BYTE_TO_DATE_TIME_3(SVMDateTimeRef date_time, uint16_t date, uint16_t time)
+  {
+    date_time -> DYear = ((date & YEAR_MASK) >> YEAR_SHIFT) + YEAR_OFFSET;
+    date_time -> DMonth = ((date & MONTH_MASK) >> MONTH_SHIFT);
+    date_time -> DDay = date & DAY_MASK;
+
+    date_time -> DHour = (time & HOURS_MASK) >> HOURS_SHIFT;
+    date_time -> DMinute = (time & MINUTES_MASK) >> MINUTES_SHIFT;
+    date_time -> DSecond = (time & SECONDS_MASK) * 2;
+  };
+
+  void BYTE_TO_DATE_TIME_4(
+    SVMDateTimeRef date_time, uint16_t date, uint16_t time, uint8_t time_tenth)
+  {
+    BYTE_TO_DATE_TIME_3(date_time, date, time);
+
+    date_time -> DSecond += (time_tenth / 100);
+    date_time -> DHundredth = time_tenth % 100;
+  }
+
+
+  // expects 11 bytes
+  std::string BUF_TO_SHORT_NAME(char* buf)
+  {
+    char short_name[13] = {
+      '\0', '\0', '\0', '\0', '\0', '\0',
+      '\0', '\0', '\0', '\0', '\0', '\0', '\0'};
+
+    int i = 0;
+    for (int j = 0; j < 8; j++)
+    {
+      if ((j == 0) && (buf[j] == 0x05))
+      {
+        short_name[i] = 0xE5;
+        i += 1;
+      }
+      else if (buf[j] != 0x20)
+      {
+        short_name[i] = buf[j];
+        i += 1;
+      }
+    }
+
+    if (buf[8] != 0x20)
+    {
+      short_name[i] = '.';
+      i += 1;
+    }
+
+    for (int j = 8; j < 11; j++)
+    {
+      if (buf[j] != 0x20)
+      {
+        short_name[i] = buf[j];
+        i += 1;
+      }
+    }
+
+    return std::string(short_name);
+  }
+
+
+
   // used internally for comparison of priorities.
   // Because of this functiton we're independent from actual values
   // assigned to priority constants
@@ -270,132 +349,188 @@ extern "C"
 
 
 
+//
+//   // Case 1: we know real FD, FD OFFSET, PATH
+//   // - IF WE MESS UP FD OFFSET, WE WON'T FIND WHERE TO READ.
+//   //    - NEED TO KNOW 1ST CLUSTER
+//   //    - NEED TO HAVE ACCESS TO FAT TABLE IN CASE DIR IS LONG
+//   //    - DON'T KNOW DATE, TIME, or other details
+//   //
+//   // Case 2: we have only 32 bytes of info
+//   // - Need to:
+//   // -
+//
+//   bool Directory::init_root()
+//   {
+//
+//
+//
+//
+//     tmp = -1;
+//     int root_dir_offset = get_offset_of_sector(get_first_sector_of_cluster(1));
+//     res = OG_VMFileSeek(&mask, mount_fd, root_dir_offset, 0, &tmp);
+//     MachineSuspendSignals(&mask);
+//     if (res != VM_STATUS_SUCCESS)
+//     {
+//       MachineResumeSignals(&mask);
+//       return false;
+//     }
+//
+//     int to_read_bytes = bytes_per_sector;
+//     char buf[to_read_bytes];
+//     for (int i = 0; i < to_read_bytes; i++)
+//     {
+//       buf[i] = '\0';
+//     }
+//
+//     bool done = false;
+//     res = VM_STATUS_SUCCESS;
+//     for (int i = 0; !done && (i < root_dir_sectors_count); i++)
+//     {
+//       res = OG_VMFileRead(&mask, mount_fd, buf, &to_read_bytes);
+//       MachineSuspendSignals(&mask);
+//
+//       if (res != VM_STATUS_SUCCESS)
+//       {
+//         break;
+//       }
+//
+//       done = add_files_dirs_to_cur_path(buf, to_read_bytes);
+//     }
+//
+//     if (res != VM_STATUS_SUCCESS)
+//     {
+//       MachineResumeSignals(&mask);
+//       return false;
+//     }
+//
+//     current_dir_cluster_number = 1;
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//     // dir_name           bytes 0 - 11
+//     // attributes         bytes 11              ATTR_DIRECTORY
+//     // ntr                bytes 12
+//     // crttime10          bytes 13
+//     // crt time           bytes 14, 15
+//     // crt date           bytes 16, 17
+//     // last access date   bytes 18, 19
+//     // unused clst num    bytes 20, 21
+//     // write time         bytes 22, 23
+//     // write date         bytes 23, 25
+//     // first cluster #    bytes 26, 27
+//     // file size          bytes 28-31
+//
+//     // ASSUME, we know it's a directory
+//     // - Create lock
+//     // - Parse 32 bytes and store data
+//     //
+//     // -
+//     //
+//     // WHILE parent is locked:
+//     // - Parse values, and store them
+//     // -- directories: "shortname" : <Directory>
+//     // --
+//   }
+//
+// /*
+// Logic:
+// - we have a root dir. It's special
+// - each dir knows it's full path
+// - each dir has all attributes (including short name)
+// - all dirs are stored in global map: <fulpath, Directory*>
+// - each directory has cur_i to display;
+// - each directory has it's own map of next ITEMS: <"shortname", Directory>
+// - each directory knows it's "." directory
+// - each directory knows it's ".." directory (separate values)
+// - For each directory, class attributes from <abspath, Directory*> are used for display
+// -
+// - methods: create_new_directory()
+// - methods: delete_existing_directory()
+// - methods: rewind()?
+// */
+//
+//
 
 
 
 
-
-
-
-
-
-
-
-  class EntryDirectory
+  class DirEntry
   {
+    std::string short_name;
+    uint16_t first_cluster_number;
 
-  };
+    SVMDirectoryEntry internal_entry;
 
-  class EntryFile
-  {
-
-  };
-
-  class Directory
-  {
-    std::string absolute_path;
-    int real_fd = -1;
-    int real_fd_offset;
-
-    bool is_root_dir = false;
-
-    bool is_lock_free = true;
-    TVMThreadID lock_owner_id = 0;
-    TVMMutexID lock_id;
-
-    bool is_real_fd_access_allowed();
-    
   public:
-    Directory(std::string abs_pth, int real_f_d, int real_f_d_offset);
-    ~Directory();
-
-    std::string get_absolute_path() { return absolute_path; }
-    bool is_root() { return is_root_dir; }
-
-    bool get_real_fd(int *fd);
-    bool get_real_fd_offset(int *fd_offset);
-
-    bool set_real_fd(int fd);
-    bool set_real_fd_offset(int fd_offset);
-
-    void acquire_lock(TMachineSignalStateRef mask_ptr);
-    void release_lock(TMachineSignalStateRef mask_ptr);
-
-    bool init_root();
+    DirEntry(char* buffer);
   };
 
-
-  // Case 1: we know real FD, FD OFFSET, PATH
-  // - IF WE MESS UP FD OFFSET, WE WON'T FIND WHERE TO READ.
-  //    - NEED TO KNOW 1ST CLUSTER
-  //    - NEED TO HAVE ACCESS TO FAT TABLE IN CASE DIR IS LONG
-  //    - DON'T KNOW DATE, TIME, or other details
-  //
-  // Case 2: we have only 32 bytes of info
-  // - Need to:
-  // -
-
-  bool Directory::init_root()
+  DirEntry::DirEntry(char* buffer)
   {
-    // dir_name           bytes 0 - 11
-    // attributes         bytes 11              ATTR_DIRECTORY
-    // ntr                bytes 12
-    // crttime10          bytes 13
-    // crt time           bytes 14, 15
-    // crt date           bytes 16, 17
-    // last access date   bytes 18, 19
-    // unused clst num    bytes 20, 21
-    // write time         bytes 22, 23
-    // write date         bytes 23, 25
-    // first cluster #    bytes 26, 27
-    // file size          bytes 28-31
 
-    // ASSUME, we know it's a directory
-    // - Create lock
-    // - Parse 32 bytes and store data
-    //
-    // -
-    //
-    // WHILE parent is locked:
-    // - Parse values, and store them
-    // -- directories: "shortname" : <Directory>
-    // --
+    short_name = BUF_TO_SHORT_NAME(buffer);
+    // short name
+    VMStringCopy(internal_entry.DShortFileName, short_name.c_str());
+    // size
+    TO_LITTLE_ENDIAN_INT((uint8_t*)(buffer + 28), 4, (void*) &internal_entry.DSize, 5);
+    // attributes
+    internal_entry.DAttributes = buffer[11];
+
+
+    uint16_t creat_date;
+    uint16_t creat_time;
+    uint8_t create_time_tenth;
+    uint16_t access_time = 0;
+    uint16_t access_date;
+    uint16_t write_date;
+    uint16_t write_time;
+
+    TO_LITTLE_ENDIAN_INT((uint8_t*)(buffer + 16), 2, (void*) &creat_date, 3);
+    TO_LITTLE_ENDIAN_INT((uint8_t*)(buffer + 14), 2, (void*) &creat_time, 3);
+    TO_LITTLE_ENDIAN_INT((uint8_t*)(buffer + 13), 1, (void*) &create_time_tenth, 1);
+    TO_LITTLE_ENDIAN_INT((uint8_t*)(buffer + 18), 2, (void*) &access_date, 3);
+    TO_LITTLE_ENDIAN_INT((uint8_t*)(buffer + 24), 2, (void*) &write_date, 3);
+    TO_LITTLE_ENDIAN_INT((uint8_t*)(buffer + 22), 2, (void*) &write_time, 3);
+
+    BYTE_TO_DATE_TIME_4(
+      &(internal_entry.DCreate), creat_date, creat_time, create_time_tenth);
+    BYTE_TO_DATE_TIME_3(&(internal_entry.DAccess), access_date, access_time);
+    BYTE_TO_DATE_TIME_3(&(internal_entry.DModify), write_date, write_time);
+
+
+    TO_LITTLE_ENDIAN_INT(
+      (uint8_t*)(buffer + 26), 2, (void*) &first_cluster_number, 3);
   }
 
-/*
-Logic:
-- we have a root dir. It's special
-- each dir knows it's full path
-- each dir has all attributes (including short name)
-- all dirs are stored in global map: <fulpath, Directory*>
-- each directory has cur_i to display;
-- each directory has it's own map of next ITEMS: <"shortname", Directory>
-- each directory knows it's "." directory
-- each directory knows it's ".." directory (separate values)
-- For each directory, class attributes from <abspath, Directory*> are used for display
--
-- methods: create_new_directory()
-- methods: delete_existing_directory()
-- methods: rewind()?
+  class FdOffset
+  {
+  public:
+    int fd = -1;
+    int offset = -1;
+  };
 
 
-
-
-*/
-
-
-
-
-  // @TODO LIST:
-  // - Delete dynamically creeated Directories
   class FatFS
   {
     std::string mount_name;
-    Directory *cur_dir = NULL;
+    std::string abs_path = "/";
 
-    // @TODO: protect by lock??
-    std::map<std::string, Directory*> all_directories;
-    // dir fds??
+    bool is_mount_lock_free = true;
+    TVMThreadID mount_lock_owner_id = 0;
+    TVMMutexID mount_lock_id;
+    FdOffset mount_fd_offset;
+    int root_dir_eof_offset = -1;
+    std::vector<DirEntry*> root_dir_entries;
 
     bool is_fat_lock_free = true;
     TVMThreadID fat_lock_owner_id = 0;
@@ -419,6 +554,7 @@ Logic:
     uint32_t fat_size;
 
     bool is_fat_array_access_allowed();
+    bool is_mount_access_allowed();
 
     // n = 0 -> fat array offset
     // n = 1 -> root dir offset
@@ -427,6 +563,7 @@ Logic:
 
     bool init_metadata(TMachineSignalStateRef mask_ptr);
     bool init_fat_array(TMachineSignalStateRef mask_ptr);
+    bool init_root_dir(TMachineSignalStateRef mask_ptr);
 
     void debug_print_bpb_metadata();
   public:
@@ -435,6 +572,11 @@ Logic:
     void acquire_fat_lock(TMachineSignalStateRef mask_ptr);
     void release_fat_lock(TMachineSignalStateRef mask_ptr);
     std::vector<uint32_t>* get_fat_array();
+
+    void acquire_mount_lock(TMachineSignalStateRef mask_ptr);
+    void release_mount_lock(TMachineSignalStateRef mask_ptr);
+    FdOffset* get_mount_fd_offset();
+    std::vector<DirEntry*>* get_root_dir_entries();
   };
 
 
@@ -727,144 +869,6 @@ Logic:
 
 
 
-
-
-
-
-
-
-
-
-
-
-  // +
-  Directory::Directory(std::string abs_pth, int real_f_d, int real_f_d_offset)
-  {
-    absolute_path = abs_pth;
-    real_fd = real_f_d;
-    real_fd_offset = real_f_d_offset;
-
-    if (absolute_path == "/")
-    {
-      is_root_dir = true;
-    }
-
-    TVMStatus res = VMMutexCreate(&lock_id);
-    if (res != VM_STATUS_SUCCESS)
-    {
-      std::cout << "[Directory] Failed to create a lock in constructor\n";
-    }
-  }
-
-  // +
-  Directory::~Directory()
-  {
-    TVMStatus res = VMMutexDelete(lock_id);
-    if (res != VM_STATUS_SUCCESS)
-    {
-      std::cout << "[Directory] Failed to delete a lock in deconstructor\n";
-    }
-  }
-
-  // +
-  bool Directory::is_real_fd_access_allowed()
-  {
-    return !is_lock_free &&
-      (lock_owner_id == global_state.cur_thread_ptr -> get_thread_id());
-  }
-
-  // +
-  bool Directory::get_real_fd(int *fd)
-  {
-    if (!is_real_fd_access_allowed())
-    {
-      return false;
-    }
-
-    *fd = real_fd;
-    return true;
-  }
-
-  // +
-  bool Directory::get_real_fd_offset(int *fd_offset)
-  {
-    if (!is_real_fd_access_allowed())
-    {
-      return false;
-    }
-
-    *fd_offset = real_fd_offset;
-    return true;
-  }
-
-  // +
-  bool Directory::set_real_fd(int fd)
-  {
-    if (!is_real_fd_access_allowed())
-    {
-      return false;
-    }
-
-    real_fd = fd;
-    return true;
-  }
-
-  // +
-  bool Directory::set_real_fd_offset(int fd_offset)
-  {
-    if (!is_real_fd_access_allowed())
-    {
-      return false;
-    }
-
-    real_fd_offset = fd_offset;
-    return true;
-  }
-
-  // +
-  void Directory::acquire_lock(TMachineSignalStateRef mask_ptr)
-  {
-    TVMStatus res = OG_VMMutexAcquire(mask_ptr, lock_id, VM_TIMEOUT_INFINITE);
-    MachineSuspendSignals(mask_ptr);
-
-    if (res != VM_STATUS_SUCCESS)
-    {
-      std::cout << "[Directory] can't acquire_lock(). Status = " << res << ".\n";
-      return;
-    }
-
-    is_lock_free = false;
-    lock_owner_id = global_state.cur_thread_ptr -> get_thread_id();
-  }
-
-  // +
-  void Directory::release_lock(TMachineSignalStateRef mask_ptr)
-  {
-    if (is_real_fd_access_allowed())
-    {
-      is_lock_free = true;
-      lock_owner_id = 0;
-
-      TVMStatus res = OG_VMMutexRelease(mask_ptr, lock_id);
-      MachineSuspendSignals(mask_ptr);
-
-      if (res != VM_STATUS_SUCCESS)
-      {
-        std::cout << "[Directory] can't release_lock(). Status = " << res << ".\n";
-        return;
-      }
-    }
-  }
-
-
-
-
-
-
-
-
-
-
   void FatFS::debug_print_bpb_metadata()
   {
     std::cout << "-----------------METADATA---------------------\n"
@@ -917,13 +921,20 @@ Logic:
   }
 
 
-
   // +
   bool FatFS::is_fat_array_access_allowed()
   {
     return !is_fat_lock_free &&
       (fat_lock_owner_id == global_state.cur_thread_ptr -> get_thread_id());
   }
+
+  // +
+  bool FatFS::is_mount_access_allowed()
+  {
+    return !is_mount_lock_free &&
+      (mount_lock_owner_id == global_state.cur_thread_ptr -> get_thread_id());
+  }
+
 
   // +
   std::vector<uint32_t>* FatFS::get_fat_array()
@@ -934,6 +945,28 @@ Logic:
     }
 
     return &fat_arr;
+  }
+
+  // +
+  FdOffset* FatFS::get_mount_fd_offset()
+  {
+    if (!is_mount_access_allowed())
+    {
+      return NULL;
+    }
+
+    return &mount_fd_offset;
+  }
+
+  // +
+  std::vector<DirEntry*>* FatFS::get_root_dir_entries()
+  {
+    if (!is_mount_access_allowed())
+    {
+      return NULL;
+    }
+
+    return &root_dir_entries;
   }
 
   // +
@@ -971,45 +1004,65 @@ Logic:
     }
   }
 
+  // +
+  void FatFS::acquire_mount_lock(TMachineSignalStateRef mask_ptr)
+  {
+    TVMStatus res = OG_VMMutexAcquire(mask_ptr, mount_lock_id, VM_TIMEOUT_INFINITE);
+    MachineSuspendSignals(mask_ptr);
+
+    if (res != VM_STATUS_SUCCESS)
+    {
+      std::cout << "[FatFS] can't acquire_mount_lock(). Status = " << res << ".\n";
+      return;
+    }
+
+    is_mount_lock_free = false;
+    mount_lock_owner_id = global_state.cur_thread_ptr -> get_thread_id();
+  }
+
+  // +
+  void FatFS::release_mount_lock(TMachineSignalStateRef mask_ptr)
+  {
+    if (is_mount_access_allowed())
+    {
+      is_mount_lock_free = true;
+      mount_lock_owner_id = 0;
+
+      TVMStatus res = OG_VMMutexRelease(mask_ptr, mount_lock_id);
+      MachineSuspendSignals(mask_ptr);
+
+      if (res != VM_STATUS_SUCCESS)
+      {
+        std::cout << "[FatFS] can't release_mount_lock(). Status = " << res << ".\n";
+        return;
+      }
+    }
+  }
+
 
   // +
   bool FatFS::init_metadata(TMachineSignalStateRef mask_ptr)
   {
-    if (cur_dir == NULL)
-    {
-      return false;
-    }
+    FdOffset* mount = get_mount_fd_offset();
 
-    int cur_dir_fd = -1;
-    int tmp_cur_dir_offset = -1;
-
-    bool success = cur_dir -> get_real_fd(&cur_dir_fd);;
-    if (!success)
+    if (mount == NULL)
     {
-      std::cout << "[FatFS] can't get cur dir fd [0]: didn't acquire lock\n";
+      std::cout << "[FatFS] can't get mount [0]: didn't acquire lock\n";
       return false;
     }
 
     TVMStatus res = OG_VMFileSeek(
-      mask_ptr, cur_dir_fd,
-      0, 0, &tmp_cur_dir_offset
+      mask_ptr, mount -> fd,
+      0, 0, &(mount -> offset)
     );
     MachineSuspendSignals(mask_ptr);
 
-    success = cur_dir -> set_real_fd_offset(tmp_cur_dir_offset);
-    if (!success)
-    {
-      std::cout
-        << "[FatFS] can't update cur dir fd offset [0]: didn't acquire lock\n";
-      return false;
-    }
-
-    if ((res != VM_STATUS_SUCCESS) || (tmp_cur_dir_offset != 0))
+    if ((res != VM_STATUS_SUCCESS) || (mount -> offset != 0))
     {
       std::cout
         << "[FatFS] can't init_metadata(): failed to seek to proper offset. "
         << "Status = " << res << ". "
-        << "Offset (expected 0) = " << tmp_cur_dir_offset << ".\n";
+        << "Offset (expected 0) = " << mount -> offset << ".\n";
 
       return false;
     }
@@ -1019,7 +1072,7 @@ Logic:
     uint8_t metadata[meta_length];
 
     res = OG_VMFileRead(
-      mask_ptr, cur_dir_fd,
+      mask_ptr, mount -> fd,
       (void*) metadata, &meta_length
     );
     MachineSuspendSignals(mask_ptr);
@@ -1033,14 +1086,7 @@ Logic:
       return false;
     }
 
-    success = cur_dir -> set_real_fd_offset(meta_length);
-    if (!success)
-    {
-      std::cout
-        << "[FatFS] can't update cur dir fd offset [1]: didn't acquire lock\n";
-      return false;
-    }
-
+    mount -> offset += 512;
     // PROCESS FIRST 512 BYTES
 
     // assert is FAT
@@ -1117,49 +1163,39 @@ Logic:
   }
 
 
-  // +
+  // +-
   bool FatFS::init_fat_array(TMachineSignalStateRef mask_ptr)
   {
 
     auto fat_array = get_fat_array();
-    int cur_dir_fd = -1;
-    int tmp_cur_dir_offset = -1;
-
     if (fat_array == NULL)
     {
       std::cout << "[FatFS] can't get fat array: didn't acquire lock\n";
       return false;
     }
 
-    bool success = cur_dir -> get_real_fd(&cur_dir_fd);;
-    if (!success)
+    FdOffset* mount = get_mount_fd_offset();
+    if (mount == NULL)
     {
-      std::cout << "[FatFS] can't get cur dir fd [3]: didn't acquire lock\n";
+      std::cout << "[FatFS] can't get mount [5]: didn't acquire lock\n";
       return false;
     }
+
 
     int fat_offset = get_offset_of_cluster(0);
     TVMStatus res = OG_VMFileSeek(
-      mask_ptr, cur_dir_fd,
-      fat_offset, 0, &tmp_cur_dir_offset
+      mask_ptr, mount -> fd,
+      fat_offset, 0, &(mount -> offset)
     );
     MachineSuspendSignals(mask_ptr);
 
-    success = cur_dir -> set_real_fd_offset(tmp_cur_dir_offset);
-    if (!success)
-    {
-      std::cout
-        << "[FatFS] can't update cur dir fd offset [4]: didn't acquire lock\n";
-      return false;
-    }
-
-    if ((res != VM_STATUS_SUCCESS) || (tmp_cur_dir_offset != fat_offset))
+    if ((res != VM_STATUS_SUCCESS) || (mount -> offset != fat_offset))
     {
       std::cout
         << "[FatFS] can't init_fat_array(): failed to seek to proper offset. "
         << "Status = " << res << ". "
         << "Offset (expected " << fat_offset
-        << ") = " << tmp_cur_dir_offset << ".\n";
+        << ") = " << mount -> offset << ".\n";
 
       return false;
     }
@@ -1171,7 +1207,7 @@ Logic:
     uint8_t fat_buffer[fat_buffer_len];
 
     res = OG_VMFileRead(
-      mask_ptr, cur_dir_fd,
+      mask_ptr, mount -> fd,
       (void*) fat_buffer, &num_bytes_read
     );
 
@@ -1187,13 +1223,7 @@ Logic:
       return false;
     }
 
-    success = cur_dir -> set_real_fd_offset(fat_buffer_len + tmp_cur_dir_offset);
-    if (!success)
-    {
-      std::cout
-        << "[FatFS] can't update cur dir fd offset [5]: didn't acquire lock\n";
-      return false;
-    }
+    mount -> offset += fat_buffer_len;
 
     // STORE FAT VALUES
     for (uint32_t i = 0; i < fat_size; i++)
@@ -1217,8 +1247,100 @@ Logic:
     return true;
   }
 
+  /*
+  -- add existing
+  -- need to be able to add new dir
+  -- need to bee able to delete existing dir
+  */
 
-  // +
+
+  bool FatFS::init_root_dir(TMachineSignalStateRef mask_ptr)
+  {
+    FdOffset* mount = get_mount_fd_offset();
+    if (mount == NULL)
+    {
+      std::cout << "[FatFS] can't get mount [11]: didn't acquire lock\n";
+      return false;
+    }
+
+    std::vector<DirEntry*>* entries = get_root_dir_entries();
+    if (entries == NULL)
+    {
+      std::cout << "[FatFS] can't get entries [182]: didn't acquire lock\n";
+      return false;
+    }
+
+    int root_dir_offset = get_offset_of_cluster(1);
+    TVMStatus res = OG_VMFileSeek(
+      mask_ptr, mount -> fd,
+      root_dir_offset, 0, &(mount -> offset)
+    );
+    MachineSuspendSignals(mask_ptr);
+
+    if ((res != VM_STATUS_SUCCESS) || (mount -> offset != root_dir_offset))
+    {
+      std::cout
+        << "[FatFS] can't init_root_dir(): failed to seek to proper offset. "
+        << "Status = " << res << ". "
+        << "Offset (expected " << root_dir_offset << ") = "
+        << mount -> offset << ".\n";
+
+      return false;
+    }
+
+
+    int num_of_bytes_to_read = bytes_per_sector;
+    char root_dir_buffer[num_of_bytes_to_read];
+
+    bool done = false;
+    res = VM_STATUS_SUCCESS;
+    for (int i = 0; !done && (i < root_dir_sectors_count); i++)
+    {
+      res = OG_VMFileRead(
+        mask_ptr, mount -> fd,
+        root_dir_buffer, &num_of_bytes_to_read
+      );
+      MachineSuspendSignals(mask_ptr);
+
+      if ((res != VM_STATUS_SUCCESS) || (num_of_bytes_to_read != bytes_per_sector))
+      {
+        std::cout
+          << "[FatFS] can't init_root_dir(): failed to read root dir. "
+          << "Status = " << res << ". "
+          << "Expected bytes read = " << bytes_per_sector << ". "
+          << "Actually read = " << num_of_bytes_to_read << ". "
+          << "Offset before reading = " << mount -> offset << ".\n";
+
+        return false;
+      }
+
+      for (int i = 0; i < bytes_per_sector; i += 32)
+      {
+        // END
+        if (root_dir_buffer[i] == 0x00)
+        {
+          root_dir_eof_offset = mount -> offset + i;
+          done = true;
+          break;
+        }
+
+        // checking attributes.
+        char LONG_NAME = 0x0f;
+        if (root_dir_buffer[i + 11] == LONG_NAME)
+        {
+          continue;
+        }
+
+        DirEntry *new_entry = new DirEntry(root_dir_buffer + i);
+        entries -> push_back(new_entry);
+      }
+      mount -> offset += bytes_per_sector;
+    }
+
+    return true;
+  }
+
+  // +-
   // @TODO: delete dynamically created new Directory
   bool FatFS::init(const char *mount_name_ptr)
   {
@@ -1248,19 +1370,27 @@ Logic:
       return false;
     }
 
-    cur_dir = new Directory("/", fd, 0);
-    cur_dir -> acquire_lock(&mask);
+    mount_fd_offset.fd = fd;
+    mount_fd_offset.offset = 0;
+
+    res = VMMutexCreate(&mount_lock_id);
+    if (res != VM_STATUS_SUCCESS)
+    {
+      std::cout << "[FatFS] Failed to create mount lock\n";
+      MachineResumeSignals(&mask);
+      return false;
+    }
 
     res = VMMutexCreate(&fat_lock_id);
     if (res != VM_STATUS_SUCCESS)
     {
       std::cout << "[FatFS] Failed to create a fat array lock\n";
-      cur_dir -> release_lock(&mask);
       MachineResumeSignals(&mask);
       return false;
     }
+    acquire_mount_lock(&mask);
     acquire_fat_lock(&mask);
-    // @TODO: release locks everywhere
+
 
     bool success = init_metadata(&mask);
     if (!success)
@@ -1268,39 +1398,36 @@ Logic:
       std::cout << "[FatFS] can't init(): failed to init metadata\n";
 
       release_fat_lock(&mask);
-      cur_dir -> release_lock(&mask);
+      release_mount_lock(&mask);
       MachineResumeSignals(&mask);
       return false;
     }
 
     success = init_fat_array(&mask);
-
     if (!success)
     {
-      std::cout << "[FatFS] can't init(): failed to init FAR array\n";
+      std::cout << "[FatFS] can't init(): failed to init FAT array\n";
 
       release_fat_lock(&mask);
-      cur_dir -> release_lock(&mask);
+      release_mount_lock(&mask);
       MachineResumeSignals(&mask);
       return false;
     }
 
-    success = cur_dir -> init_root();
+    success = init_root_dir(&mask);
     if (!success)
     {
       std::cout << "[FatFS] can't init(): failed to init root dir\n";
 
       release_fat_lock(&mask);
-      cur_dir -> release_lock(&mask);
+      release_mount_lock(&mask);
       MachineResumeSignals(&mask);
       return false;
     }
 
-    // @TODO: protect by lock??
-    all_directories["/"] = cur_dir;
     release_fat_lock(&mask);
-    cur_dir -> release_lock(&mask);
-
+    release_mount_lock(&mask);
+    MachineResumeSignals(&mask);
     return true;
   }
 
@@ -1923,11 +2050,27 @@ Logic:
 
 
 
-
-
-
-
-
+  //
+  //
+  // TVMStatus VMDirectoryOpen(const char *dirname, int *dirdescriptor)
+  // {
+  //   TMachineSignalState mask;
+  //   MachineSuspendSignals(&mask);
+  //
+  //   if ((dirname == NULL) || (dirname == NULL))
+  //   {
+  //     MachineResumeSignals(&mask);
+  //     return VM_STATUS_ERROR_INVALID_PARAMETER;
+  //   }
+  //
+  //
+  //
+  //
+  //   MachineResumeSignals(&mask);
+  //   return VM_STATUS_SUCCESS;
+  // }
+  //
+  //
 
 
 
