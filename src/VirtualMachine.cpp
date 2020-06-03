@@ -167,7 +167,7 @@ extern "C"
   uint16_t MONTH_MASK  = 0b0000000111100000;
   uint16_t YEAR_MASK   = 0b1111111000000000;
   uint8_t  MONTH_SHIFT = 5;
-  uint8_t  YEAR_SHIFT  = 5;
+  uint8_t  YEAR_SHIFT  = 9;
   uint16_t YEAR_OFFSET = 1980;
 
   uint16_t HOURS_MASK    = 0b1111100000000000;
@@ -592,6 +592,7 @@ extern "C"
     bool init_new_fd(int fd);
     bool delete_fd(int fd);
     bool read_fd_dir(int fd, SVMDirectoryEntryRef dir);
+    bool rewind_fd_dir(int fd);
   };
 
 
@@ -871,10 +872,23 @@ extern "C"
 
 
 
-  // bool rewind_fd_dir(int fd)
-  // {
-  //   return false;
-  // }
+
+  // +
+  bool FatFS::rewind_fd_dir(int fd)
+  {
+    if (!is_mount_access_allowed())
+    {
+      return false;
+    }
+
+    auto iter = dir_fds.find(fd);
+    if (iter != dir_fds.end())
+    {
+      iter -> second = 0;
+      return true;
+    }
+    return false;
+  }
 
   // +
   bool FatFS::read_fd_dir(int fd, SVMDirectoryEntryRef dir)
@@ -2170,14 +2184,27 @@ extern "C"
 
 
 
-
+  // +
   TVMStatus VMDirectoryRewind(int dirdescriptor)
   {
-    return VM_STATUS_FAILURE;
+    TMachineSignalState mask;
+    MachineSuspendSignals(&mask);
+
+    global_state.fat_fs.acquire_mount_lock(&mask);
+    if (!global_state.fat_fs.rewind_fd_dir(dirdescriptor))
+    {
+      global_state.fat_fs.release_mount_lock(&mask);
+      MachineResumeSignals(&mask);
+      return VM_STATUS_FAILURE;
+    }
+
+    global_state.fat_fs.release_mount_lock(&mask);
+    MachineResumeSignals(&mask);
+    return VM_STATUS_SUCCESS;
   }
 
 
-  //   bool read_fd_dir(int fd, SVMDirectoryEntryRef dir)
+  // +
   TVMStatus VMDirectoryRead(int dirdescriptor, SVMDirectoryEntryRef dirent)
   {
     TMachineSignalState mask;
