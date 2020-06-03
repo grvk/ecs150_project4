@@ -473,6 +473,10 @@ extern "C"
 
   public:
     DirEntry(char* buffer);
+    void get_internal_entry(SVMDirectoryEntryRef ptr)
+    {
+      *ptr = internal_entry;
+    }
   };
 
   DirEntry::DirEntry(char* buffer)
@@ -522,6 +526,9 @@ extern "C"
 
   class FatFS
   {
+    inline static int last_file_fd = 100;
+    inline static int last_dir_fd = 101;
+
     std::string mount_name;
     std::string abs_path = "/";
 
@@ -531,6 +538,7 @@ extern "C"
     FdOffset mount_fd_offset;
     int root_dir_eof_offset = -1;
     std::vector<DirEntry*> root_dir_entries;
+    std::map<int, int> dir_fds;
 
     bool is_fat_lock_free = true;
     TVMThreadID fat_lock_owner_id = 0;
@@ -577,6 +585,13 @@ extern "C"
     void release_mount_lock(TMachineSignalStateRef mask_ptr);
     FdOffset* get_mount_fd_offset();
     std::vector<DirEntry*>* get_root_dir_entries();
+
+    void get_current_working_directory(char *dst);
+    int generate_new_fd(bool is_dir);
+
+    bool init_new_fd(int fd);
+    bool delete_fd(int fd);
+    bool read_fd_dir(int fd, SVMDirectoryEntryRef dir);
   };
 
 
@@ -856,18 +871,96 @@ extern "C"
 
 
 
+  // bool rewind_fd_dir(int fd)
+  // {
+  //   return false;
+  // }
 
+  // +
+  bool FatFS::read_fd_dir(int fd, SVMDirectoryEntryRef dir)
+  {
+    if (!is_mount_access_allowed())
+    {
+      return false;
+    }
 
+    auto iter = dir_fds.find(fd);
+    if (iter != dir_fds.end())
+    {
+      if (iter -> second < root_dir_entries.size())
+      {
+        auto entries = get_root_dir_entries();
+        DirEntry *entry = (*entries)[iter -> second];
+        if (entry == NULL)
+        {
+          return false;
+        }
+        entry -> get_internal_entry(dir);
+        (iter -> second) += 1;
+        return true;
+      }
+    }
+    return false;
+  }
 
+  // +
+  bool FatFS::delete_fd(int fd)
+  {
+    if (!is_mount_access_allowed())
+    {
+      return false;
+    }
 
+    // file fd
+    if (fd % 2 == 0)
+    {
+      std::cout << "[FatFS] unexpected delete_fd for file\n";
+      return false;
+    }
+    // dir fd
+    else
+    {
+      auto iter = dir_fds.find(fd);
+      if (iter != dir_fds.end())
+      {
+        dir_fds.erase(iter);
+      }
+    }
 
+    return true;
+  }
 
+  // +
+  bool FatFS::init_new_fd(int fd)
+  {
+    if (!is_mount_access_allowed())
+    {
+      return false;
+    }
 
+    // file fd
+    if (fd % 2 == 0)
+    {
+      std::cout << "[FatFS] unexpected init_new_fd for file\n";
+      return false;
+    }
+    // dir fd
+    else
+    {
+      dir_fds[fd] = 0;
+    }
 
+    return true;
+  }
 
-
-
-
+  void FatFS::get_current_working_directory(char *dst)
+  {
+    if (dst != NULL)
+    {
+      dst[0] = abs_path[0];
+      dst[1] = '\0';
+    }
+  }
 
   void FatFS::debug_print_bpb_metadata()
   {
@@ -967,6 +1060,27 @@ extern "C"
     }
 
     return &root_dir_entries;
+  }
+
+  int FatFS::generate_new_fd(bool is_dir)
+  {
+    if (!is_mount_access_allowed())
+    {
+      return -1;
+    }
+
+    int fd;
+    if (is_dir)
+    {
+      fd = FatFS::last_dir_fd;
+      FatFS::last_dir_fd += 2;
+    }
+    else
+    {
+      fd = FatFS::last_file_fd;
+      FatFS::last_dir_fd += 2;
+    }
+    return fd;
   }
 
   // +
@@ -1493,7 +1607,7 @@ extern "C"
       return VM_STATUS_FAILURE;
     }
 
-    // fnEntry(argc, argv);
+    fnEntry(argc, argv);
 
     MachineTerminate();
     VMUnloadModule();
@@ -2050,27 +2164,198 @@ extern "C"
 
 
 
+
+
+
+
+
+
+
+  TVMStatus VMDirectoryRewind(int dirdescriptor)
+  {
+    return VM_STATUS_FAILURE;
+  }
+
+
+  //   bool read_fd_dir(int fd, SVMDirectoryEntryRef dir)
+  TVMStatus VMDirectoryRead(int dirdescriptor, SVMDirectoryEntryRef dirent)
+  {
+    TMachineSignalState mask;
+    MachineSuspendSignals(&mask);
+
+    if (dirent == NULL)
+    {
+      std::cout << "[VMDirectoryRead] Error: dirent is NULL\n";
+      MachineResumeSignals(&mask);
+      return VM_STATUS_ERROR_INVALID_PARAMETER;
+    }
+
+    global_state.fat_fs.acquire_mount_lock(&mask);
+    if (!global_state.fat_fs.read_fd_dir(dirdescriptor, dirent))
+    {
+      global_state.fat_fs.release_mount_lock(&mask);
+      MachineResumeSignals(&mask);
+      return VM_STATUS_FAILURE;
+    }
+
+    global_state.fat_fs.release_mount_lock(&mask);
+    MachineResumeSignals(&mask);
+    return VM_STATUS_SUCCESS;
+  }
+
+
+  // +
+  TVMStatus VMDirectoryOpen(const char *dirname, int *dirdescriptor)
+  {
+    TMachineSignalState mask;
+    MachineSuspendSignals(&mask);
+
+    if ((dirname == NULL) || (dirdescriptor == NULL))
+    {
+      std::cout <<
+        "[VMDirectoryOpen] Error: either dirname or dirdescriptor is NULL\n";
+      MachineResumeSignals(&mask);
+      return VM_STATUS_ERROR_INVALID_PARAMETER;
+    }
+
+    char newpath[128];
+    char curpath[128];
+
+    global_state.fat_fs.get_current_working_directory(curpath);
+
+    TVMStatus res = VMFileSystemGetAbsolutePath(newpath, curpath, dirname);
+    if (res != VM_STATUS_SUCCESS)
+    {
+      std::cout << "[VMDirectoryOpen] Error: incorrect path: " << dirname << "\n";
+      MachineResumeSignals(&mask);
+      return VM_STATUS_FAILURE;
+    }
+
+    if (std::string(newpath) != std::string(curpath))
+    {
+      std::cout
+        << "[VMDirectoryOpen] Error: not supported path: " << dirname << "."
+        << "Cur path: " << curpath << "  "
+        << "New path: " << newpath << "  \n";
+      MachineResumeSignals(&mask);
+      return VM_STATUS_FAILURE;
+    }
+
+    global_state.fat_fs.acquire_mount_lock(&mask);
+    int fd = global_state.fat_fs.generate_new_fd(true);
+    if (fd == -1)
+    {
+      std::cout << "[VMDirectoryOpen] Error: unexpected generated fd = -1\n";
+      global_state.fat_fs.release_mount_lock(&mask);
+      MachineResumeSignals(&mask);
+      return VM_STATUS_FAILURE;
+    }
+
+    if (!global_state.fat_fs.init_new_fd(fd))
+    {
+      std::cout << "[VMDirectoryOpen] Error: failed to init fd\n";
+      global_state.fat_fs.release_mount_lock(&mask);
+      MachineResumeSignals(&mask);
+      return VM_STATUS_FAILURE;
+    }
+
+    *dirdescriptor = fd;
+
+    global_state.fat_fs.release_mount_lock(&mask);
+
+    MachineResumeSignals(&mask);
+    return VM_STATUS_SUCCESS;
+  }
+
+  // +
+  TVMStatus VMDirectoryClose(int dirdescriptor)
+  {
+    TMachineSignalState mask;
+    MachineSuspendSignals(&mask);
+
+    global_state.fat_fs.acquire_mount_lock(&mask);
+
+    if (!global_state.fat_fs.delete_fd(dirdescriptor))
+    {
+      std::cout << "[VMDirectoryClose] Error: unexpected error on deletion \n";
+      global_state.fat_fs.release_mount_lock(&mask);
+      MachineResumeSignals(&mask);
+      return VM_STATUS_FAILURE;
+    }
+
+    global_state.fat_fs.release_mount_lock(&mask);
+
+    MachineResumeSignals(&mask);
+    return VM_STATUS_SUCCESS;
+  }
+
+
   //
   //
-  // TVMStatus VMDirectoryOpen(const char *dirname, int *dirdescriptor)
-  // {
-  //   TMachineSignalState mask;
-  //   MachineSuspendSignals(&mask);
-  //
-  //   if ((dirname == NULL) || (dirname == NULL))
-  //   {
-  //     MachineResumeSignals(&mask);
-  //     return VM_STATUS_ERROR_INVALID_PARAMETER;
-  //   }
-  //
-  //
-  //
-  //
-  //   MachineResumeSignals(&mask);
-  //   return VM_STATUS_SUCCESS;
-  // }
-  //
-  //
+
+
+  // +
+  TVMStatus VMDirectoryCurrent(char *abspath)
+  {
+    TMachineSignalState mask;
+    MachineSuspendSignals(&mask);
+
+    if (abspath == NULL)
+    {
+      MachineResumeSignals(&mask);
+      std::cout << "[VMDirectoryCurrent] Error: abspath is NULL\n";
+      return VM_STATUS_ERROR_INVALID_PARAMETER;
+    }
+
+    global_state.fat_fs.get_current_working_directory(abspath);
+
+    MachineResumeSignals(&mask);
+    return VM_STATUS_SUCCESS;
+  }
+
+  // +
+  TVMStatus VMDirectoryChange(const char *path)
+  {
+    TMachineSignalState mask;
+    MachineSuspendSignals(&mask);
+
+    if (path == NULL)
+    {
+      std::cout << "[VMDirectoryChange] Error: path is NULL\n";
+      MachineResumeSignals(&mask);
+      return VM_STATUS_ERROR_INVALID_PARAMETER;
+    }
+
+    char newpath[128];
+    char curpath[128];
+
+    global_state.fat_fs.get_current_working_directory(curpath);
+
+    TVMStatus res = VMFileSystemGetAbsolutePath(newpath, curpath, path);
+    if ((res != VM_STATUS_SUCCESS) || (std::string(newpath) != std::string(curpath)))
+    {
+      std::cout
+        << "[VMDirectoryChange] Error: not supported path: " << path << "."
+        << "Cur path: " << curpath << "  "
+        << "New path: " << newpath << "  \n";
+
+      MachineResumeSignals(&mask);
+      return VM_STATUS_FAILURE;
+    }
+
+    MachineResumeSignals(&mask);
+    return VM_STATUS_SUCCESS;
+  }
+
+  TVMStatus VMDirectoryCreate(const char *dirname)
+  {
+    return VM_STATUS_FAILURE;
+  }
+
+  TVMStatus VMDirectoryUnlink(const char *path)
+  {
+    return VM_STATUS_FAILURE;
+  }
 
 
 
