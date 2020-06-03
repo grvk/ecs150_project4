@@ -297,6 +297,8 @@ extern "C"
     int real_fd = -1;
     int real_fd_offset;
 
+    bool is_root = false;
+
     bool is_lock_free = true;
     TVMThreadID lock_owner_id = 0;
     TVMMutexID lock_id;
@@ -308,6 +310,7 @@ extern "C"
     ~Directory();
 
     std::string get_path() { return path; }
+    bool is_root() { return this -> is_root; }
 
     bool get_real_fd(int *fd);
     bool get_real_fd_offset(int *fd_offset);
@@ -317,7 +320,65 @@ extern "C"
 
     void acquire_lock(TMachineSignalStateRef mask_ptr);
     void release_lock(TMachineSignalStateRef mask_ptr);
+
+    bool init();
   };
+
+
+
+  Case 1: root dir
+  - KNOW: fd, fd offset, full path, 1st_cluster_num
+  -
+
+  Case 2: other dir
+  - KNOW: 32 bytes. It's a dir or not
+
+
+
+
+
+  // Case 1: we know real FD, FD OFFSET, PATH
+  // - IF WE MESS UP FD OFFSET, WE WON'T FIND WHERE TO READ.
+  //    - NEED TO KNOW 1ST CLUSTER
+  //    - NEED TO HAVE ACCESS TO FAT TABLE IN CASE DIR IS LONG
+  //    - DON'T KNOW DATE, TIME, or other details
+  //
+  // Case 2: we have only 32 bytes of info
+  // - Need to:
+  // -
+
+  bool Directory::init()
+  {
+    // dir_name           bytes 0 - 11
+    // attributes         bytes 11              ATTR_DIRECTORY
+    // ntr                bytes 12
+    // crttime10          bytes 13
+    // crt time           bytes 14, 15
+    // crt date           bytes 16, 17
+    // last access date   bytes 18, 19
+    // unused clst num    bytes 20, 21
+    // write time         bytes 22, 23
+    // write date         bytes 23, 25
+    // first cluster #    bytes 26, 27
+    // file size          bytes 28-31
+
+    // ASSUME, we know it's a directory
+    // - Create lock
+    // - Parse 32 bytes and store data
+    //
+    // -
+    //
+    // WHILE parent is locked:
+    // - Parse values, and store them
+    // -- directories: "shortname" : <Directory>
+    // --
+  }
+
+
+
+
+
+
 
   // @TODO LIST:
   // - Delete dynamically creeated Directories
@@ -673,6 +734,11 @@ extern "C"
     path = pth;
     real_fd = real_f_d;
     real_fd_offset = real_f_d_offset;
+
+    if (path == "/")
+    {
+      is_root = true;
+    }
 
     TVMStatus res = VMMutexCreate(&lock_id);
     if (res != VM_STATUS_SUCCESS)
@@ -1181,6 +1247,7 @@ extern "C"
     {
       std::cout << "[FatFS] Failed to create a fat array lock\n";
       cur_dir -> release_lock(&mask);
+      MachineResumeSignals(&mask);
       return false;
     }
     acquire_fat_lock(&mask);
@@ -1190,6 +1257,9 @@ extern "C"
     if (!success)
     {
       std::cout << "[FatFS] can't init(): failed to init metadata\n";
+
+      release_fat_lock(&mask);
+      cur_dir -> release_lock(&mask);
       MachineResumeSignals(&mask);
       return false;
     }
@@ -1199,11 +1269,25 @@ extern "C"
     if (!success)
     {
       std::cout << "[FatFS] can't init(): failed to init FAR array\n";
+
+      release_fat_lock(&mask);
+      cur_dir -> release_lock(&mask);
       MachineResumeSignals(&mask);
       return false;
     }
 
-    return false;
+    success = cur_dir -> init();
+    if (!success)
+    {
+      std::cout << "[FatFS] can't init(): failed to init root dir\n";
+
+      release_fat_lock(&mask);
+      cur_dir -> release_lock(&mask);
+      MachineResumeSignals(&mask);
+      return false;
+    }
+
+    return true;
   }
 
 
