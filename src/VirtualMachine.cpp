@@ -293,24 +293,24 @@ extern "C"
 
   class Directory
   {
-    std::string path;
+    std::string absolute_path;
     int real_fd = -1;
     int real_fd_offset;
 
-    bool is_root = false;
+    bool is_root_dir = false;
 
     bool is_lock_free = true;
     TVMThreadID lock_owner_id = 0;
     TVMMutexID lock_id;
 
     bool is_real_fd_access_allowed();
-
+    
   public:
-    Directory(std::string pth, int real_f_d, int real_f_d_offset);
+    Directory(std::string abs_pth, int real_f_d, int real_f_d_offset);
     ~Directory();
 
-    std::string get_path() { return path; }
-    bool is_root() { return this -> is_root; }
+    std::string get_absolute_path() { return absolute_path; }
+    bool is_root() { return is_root_dir; }
 
     bool get_real_fd(int *fd);
     bool get_real_fd_offset(int *fd_offset);
@@ -321,20 +321,8 @@ extern "C"
     void acquire_lock(TMachineSignalStateRef mask_ptr);
     void release_lock(TMachineSignalStateRef mask_ptr);
 
-    bool init();
+    bool init_root();
   };
-
-
-
-  Case 1: root dir
-  - KNOW: fd, fd offset, full path, 1st_cluster_num
-  -
-
-  Case 2: other dir
-  - KNOW: 32 bytes. It's a dir or not
-
-
-
 
 
   // Case 1: we know real FD, FD OFFSET, PATH
@@ -347,7 +335,7 @@ extern "C"
   // - Need to:
   // -
 
-  bool Directory::init()
+  bool Directory::init_root()
   {
     // dir_name           bytes 0 - 11
     // attributes         bytes 11              ATTR_DIRECTORY
@@ -374,8 +362,26 @@ extern "C"
     // --
   }
 
+/*
+Logic:
+- we have a root dir. It's special
+- each dir knows it's full path
+- each dir has all attributes (including short name)
+- all dirs are stored in global map: <fulpath, Directory*>
+- each directory has cur_i to display;
+- each directory has it's own map of next ITEMS: <"shortname", Directory>
+- each directory knows it's "." directory
+- each directory knows it's ".." directory (separate values)
+- For each directory, class attributes from <abspath, Directory*> are used for display
+-
+- methods: create_new_directory()
+- methods: delete_existing_directory()
+- methods: rewind()?
 
 
+
+
+*/
 
 
 
@@ -387,6 +393,9 @@ extern "C"
     std::string mount_name;
     Directory *cur_dir = NULL;
 
+    // @TODO: protect by lock??
+    std::map<std::string, Directory*> all_directories;
+    // dir fds??
 
     bool is_fat_lock_free = true;
     TVMThreadID fat_lock_owner_id = 0;
@@ -729,15 +738,15 @@ extern "C"
 
 
   // +
-  Directory::Directory(std::string pth, int real_f_d, int real_f_d_offset)
+  Directory::Directory(std::string abs_pth, int real_f_d, int real_f_d_offset)
   {
-    path = pth;
+    absolute_path = abs_pth;
     real_fd = real_f_d;
     real_fd_offset = real_f_d_offset;
 
-    if (path == "/")
+    if (absolute_path == "/")
     {
-      is_root = true;
+      is_root_dir = true;
     }
 
     TVMStatus res = VMMutexCreate(&lock_id);
@@ -1276,7 +1285,7 @@ extern "C"
       return false;
     }
 
-    success = cur_dir -> init();
+    success = cur_dir -> init_root();
     if (!success)
     {
       std::cout << "[FatFS] can't init(): failed to init root dir\n";
@@ -1286,6 +1295,11 @@ extern "C"
       MachineResumeSignals(&mask);
       return false;
     }
+
+    // @TODO: protect by lock??
+    all_directories["/"] = cur_dir;
+    release_fat_lock(&mask);
+    cur_dir -> release_lock(&mask);
 
     return true;
   }
