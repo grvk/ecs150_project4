@@ -1,4 +1,4 @@
-#ifndef VIRTUALMACHINE_H 	 	    		
+#ifndef VIRTUALMACHINE_H
 #define VIRTUALMACHINE_H
 
 #ifdef __cplusplus
@@ -11,7 +11,7 @@ extern "C" {
 #define VM_STATUS_ERROR_INVALID_ID              ((TVMStatus)0x03)
 #define VM_STATUS_ERROR_INVALID_STATE           ((TVMStatus)0x04)
 #define VM_STATUS_ERROR_INSUFFICIENT_RESOURCES  ((TVMStatus)0x05)
-                                                
+
 #define VM_THREAD_STATE_DEAD                    ((TVMThreadState)0x00)
 #define VM_THREAD_STATE_RUNNING                 ((TVMThreadState)0x01)
 #define VM_THREAD_STATE_READY                   ((TVMThreadState)0x02)
@@ -20,11 +20,11 @@ extern "C" {
 #define VM_THREAD_PRIORITY_LOW                  ((TVMThreadPriority)0x01)
 #define VM_THREAD_PRIORITY_NORMAL               ((TVMThreadPriority)0x02)
 #define VM_THREAD_PRIORITY_HIGH                 ((TVMThreadPriority)0x03)
-                                                
+
 #define VM_THREAD_ID_INVALID                    ((TVMThreadID)-1)
-                                                
+
 #define VM_MUTEX_ID_INVALID                     ((TVMMutexID)-1)
-                                                
+
 #define VM_TIMEOUT_INFINITE                     ((TVMTick)0)
 #define VM_TIMEOUT_IMMEDIATE                    ((TVMTick)-1)
 
@@ -33,20 +33,20 @@ extern "C" {
 #define VM_FILE_SYSTEM_LFN_SIZE                 VM_FILE_SYSTEM_MAX_PATH
 #define VM_FILE_SYSTEM_DIRECTORY_DELIMETER      '/'
 
-#define VM_FILE_SYSTEM_ATTR_READ_ONLY           0x01 
+#define VM_FILE_SYSTEM_ATTR_READ_ONLY           0x01
 #define VM_FILE_SYSTEM_ATTR_HIDDEN              0x02
 #define VM_FILE_SYSTEM_ATTR_SYSTEM              0x04
 #define VM_FILE_SYSTEM_ATTR_VOLUME_ID           0x08
 #define VM_FILE_SYSTEM_ATTR_DIRECTORY           0x10
 #define VM_FILE_SYSTEM_ATTR_ARCHIVE             0x20
-                                   
+
 typedef unsigned int TVMMemorySize, *TVMMemorySizeRef;
 typedef unsigned int TVMStatus, *TVMStatusRef;
 typedef unsigned int TVMTick, *TVMTickRef;
 typedef unsigned int TVMThreadID, *TVMThreadIDRef;
 typedef unsigned int TVMMutexID, *TVMMutexIDRef;
-typedef unsigned int TVMThreadPriority, *TVMThreadPriorityRef;  
-typedef unsigned int TVMThreadState, *TVMThreadStateRef;  
+typedef unsigned int TVMThreadPriority, *TVMThreadPriorityRef;
+typedef unsigned int TVMThreadState, *TVMThreadStateRef;
 
 typedef struct{
     unsigned int DYear;
@@ -87,14 +87,14 @@ TVMStatus VMThreadSleep(TVMTick tick);
 TVMStatus VMMutexCreate(TVMMutexIDRef mutexref);
 TVMStatus VMMutexDelete(TVMMutexID mutex);
 TVMStatus VMMutexQuery(TVMMutexID mutex, TVMThreadIDRef ownerref);
-TVMStatus VMMutexAcquire(TVMMutexID mutex, TVMTick timeout);     
+TVMStatus VMMutexAcquire(TVMMutexID mutex, TVMTick timeout);
 TVMStatus VMMutexRelease(TVMMutexID mutex);
 
 #define VMPrint(format, ...)        VMFilePrint ( 1,  format, ##__VA_ARGS__)
 #define VMPrintError(format, ...)   VMFilePrint ( 2,  format, ##__VA_ARGS__)
 
 TVMStatus VMFileOpen(const char *filename, int flags, int mode, int *filedescriptor);
-TVMStatus VMFileClose(int filedescriptor);      
+TVMStatus VMFileClose(int filedescriptor);
 TVMStatus VMFileRead(int filedescriptor, void *data, int *length);
 TVMStatus VMFileWrite(int filedescriptor, void *data, int *length);
 TVMStatus VMFileSeek(int filedescriptor, int offset, int whence, int *newoffset);
@@ -127,4 +127,3 @@ TVMStatus VMFileSystemRelativePath(char *relpath, const char *basepath, const ch
 #endif
 
 #endif
-
