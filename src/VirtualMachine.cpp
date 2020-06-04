@@ -10,7 +10,7 @@
 #include "VirtualMachine.h"
 #include "Machine.h"
 #include <iostream>
-
+#include <ctime>
 
 extern "C"
 {
@@ -30,6 +30,7 @@ extern "C"
   TVMStatus OG_VMMutexRelease(TMachineSignalStateRef mask, TVMMutexID mutex);
 
   void VMStringCopy(char *dest, const char *src);
+  void VMStringCopyN(char *dest, const char *src, int32_t n);
 
   struct SkeletonArgs
   {
@@ -310,9 +311,6 @@ extern "C"
     date_time -> DSecond += (time_tenth / 100);
     date_time -> DHundredth = time_tenth % 100;
   }
-
-
-
 
 
 // needs to have only legal chars; legal short name
@@ -599,6 +597,8 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
 
   class DirEntry
   {
+    int record_id = 0;
+
     std::string short_name;
     uint16_t first_cluster_number;
     bool file = false;
@@ -607,11 +607,20 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
     SVMDirectoryEntry internal_entry;
 
   public:
-    DirEntry(char* buffer);
+    DirEntry(char* buffer, int rec_id);
+    DirEntry(
+      std::string name,
+      uint16_t cluster_num,
+      unsigned char attr,
+      int size,
+      SVMDateTime create, SVMDateTime access, SVMDateTime modify, int rec_id);
 
     std::string get_short_name() { return short_name; }
     bool is_file() { return file; };
     bool is_read_only() { return read_only; }
+    void set_record_id(int id) { record_id = id; }
+
+    void store_data_in_buffer(uint8_t* buffer);
 
     void get_internal_entry(SVMDirectoryEntryRef ptr)
     {
@@ -619,9 +628,49 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
     }
   };
 
-  DirEntry::DirEntry(char* buffer)
-  {
 
+
+  void DirEntry::store_data_in_buffer(uint8_t* buffer)
+  {
+    // buffer
+    int offset = record_id * 32;
+    VMStringCopyN((char*) buffer, short_name.c_str(), short_name.size());
+    buffer[11] = internal_entry.DAttributes;
+
+    uint32_t size = internal_entry.DSize;
+
+    TO_LITTLE_ENDIAN_BUFFER_FROM_INT(buffer + 26, 2, (void*) &size, 5);
+  }
+
+
+  DirEntry::DirEntry(
+    std::string name,
+    uint16_t cluster_num,
+    unsigned char attr,
+    int size,
+    SVMDateTime create, SVMDateTime access, SVMDateTime modify, int rec_id)
+  {
+    record_id = rec_id;
+    short_name = name;
+    first_cluster_number = cluster_num;
+    file =
+      ((attr & VM_FILE_SYSTEM_ATTR_DIRECTORY) == 0) &&
+      ((attr & VM_FILE_SYSTEM_ATTR_ARCHIVE) == 0);
+    read_only = (attr & VM_FILE_SYSTEM_ATTR_READ_ONLY) != 0;
+
+    internal_entry.DSize = size;
+    internal_entry.DAttributes = attr;
+    internal_entry.DCreate = create;
+    internal_entry.DModify = modify;
+    internal_entry.DAccess = access;
+
+    VMStringCopy(internal_entry.DShortFileName, short_name.c_str());
+  }
+
+
+  DirEntry::DirEntry(char* buffer, int rec_id)
+  {
+    record_id = rec_id;
     short_name = BUF_TO_SHORT_NAME(buffer);
     // short name
     VMStringCopy(internal_entry.DShortFileName, short_name.c_str());
@@ -743,6 +792,7 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
     void file_entry_exists(std::string short_name, bool* exists, bool* is_error);
     bool allocate_new_cluster(TMachineSignalStateRef mask_ptr, int* id);
     bool store_sectors_into_memory(TMachineSignalStateRef mask_ptr, FdOffset* fd_offset, uint8_t *buffer, int sect_index, int sect_num);
+    bool store_dir_entry(TMachineSignalStateRef mask_ptr, DirEntry* new_entry);
   };
 
 
@@ -1019,6 +1069,87 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
 
     VMMutexRelease(mem_alloc_lock_id);
   }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  bool FatFS::store_dir_entry(TMachineSignalStateRef mask_ptr, DirEntry* new_entry)
+  {
+
+    if (!is_mount_access_allowed())
+    {
+      return false;
+    }
+
+
+    int sector_offset = (root_dir_eof_offset / bytes_per_sector) * bytes_per_sector;
+    int record_id = (root_dir_eof_offset % bytes_per_sector) / 32;
+    new_entry -> set_record_id(record_id);
+    root_dir_eof_offset += 32;
+
+
+    TVMStatus res = OG_VMFileSeek(
+      mask_ptr, mount_fd_offset.fd,
+      sector_offset, 0, &(mount_fd_offset.offset)
+    );
+    MachineSuspendSignals(mask_ptr);
+
+    if ((res != VM_STATUS_SUCCESS) || (mount_fd_offset.offset != sector_offset))
+    {
+      std::cout
+        << "[FatFS] can't store_dir_entry(): failed to seek to proper offset. "
+        << "Status = " << res << ". "
+        << "Offset (expected " << sector_offset << ") = "
+        << mount_fd_offset.offset << ".\n";
+
+      return false;
+    }
+
+
+    int num_of_bytes_to_read = bytes_per_sector;
+    uint8_t buffer[bytes_per_sector];
+
+    res = OG_VMFileRead(
+      mask_ptr, mount_fd_offset.fd,
+      buffer, &num_of_bytes_to_read
+    );
+    MachineSuspendSignals(mask_ptr);
+
+    if ((res != VM_STATUS_SUCCESS) || (num_of_bytes_to_read != bytes_per_sector))
+    {
+      std::cout
+        << "[FatFS] can't store_dir_entry(): failed to read root dir. "
+        << "Status = " << res << ". "
+        << "Expected bytes read = " << bytes_per_sector << ". "
+        << "Actually read = " << num_of_bytes_to_read << ". "
+        << "Offset before reading = " << mount_fd_offset.offset << ".\n";
+
+      return false;
+    }
+
+    mount_fd_offset.offset += bytes_per_sector;
+
+    new_entry -> store_data_in_buffer(buffer);
+
+    return store_sectors_into_memory(
+      mask_ptr, &mount_fd_offset, buffer, sector_offset / bytes_per_sector, 1);
+  }
+
+
+
 
 
 
@@ -1761,7 +1892,7 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
           continue;
         }
 
-        DirEntry *new_entry = new DirEntry(root_dir_buffer + i);
+        DirEntry *new_entry = new DirEntry(root_dir_buffer + i, i % 32);
         entries -> push_back(new_entry);
       }
       mount -> offset += bytes_per_sector;
@@ -2514,7 +2645,7 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
 
     if (dirent == NULL)
     {
-      std::cout << "[VMDirectoryRead] Error: dirent is NULL\n";
+      // std::cout << "[VMDirectoryRead] Error: dirent is NULL\n";
       MachineResumeSignals(&mask);
       return VM_STATUS_ERROR_INVALID_PARAMETER;
     }
@@ -2540,8 +2671,8 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
 
     if ((dirname == NULL) || (dirdescriptor == NULL))
     {
-      std::cout <<
-        "[VMDirectoryOpen] Error: either dirname or dirdescriptor is NULL\n";
+      // std::cout <<
+      //   "[VMDirectoryOpen] Error: either dirname or dirdescriptor is NULL\n";
       MachineResumeSignals(&mask);
       return VM_STATUS_ERROR_INVALID_PARAMETER;
     }
@@ -2554,17 +2685,17 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
     TVMStatus res = VMFileSystemGetAbsolutePath(newpath, curpath, dirname);
     if (res != VM_STATUS_SUCCESS)
     {
-      std::cout << "[VMDirectoryOpen] Error: incorrect path: " << dirname << "\n";
+      // std::cout << "[VMDirectoryOpen] Error: incorrect path: " << dirname << "\n";
       MachineResumeSignals(&mask);
       return VM_STATUS_FAILURE;
     }
 
     if (std::string(newpath) != std::string(curpath))
     {
-      std::cout
-        << "[VMDirectoryOpen] Error: not supported path: " << dirname << "."
-        << "Cur path: " << curpath << "  "
-        << "New path: " << newpath << "  \n";
+      // std::cout
+      //   << "[VMDirectoryOpen] Error: not supported path: " << dirname << "."
+      //   << "Cur path: " << curpath << "  "
+      //   << "New path: " << newpath << "  \n";
       MachineResumeSignals(&mask);
       return VM_STATUS_FAILURE;
     }
@@ -2573,7 +2704,7 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
     int fd = global_state.fat_fs.generate_new_fd(true);
     if (fd == -1)
     {
-      std::cout << "[VMDirectoryOpen] Error: unexpected generated fd = -1\n";
+      // std::cout << "[VMDirectoryOpen] Error: unexpected generated fd = -1\n";
       global_state.fat_fs.release_mount_lock(&mask);
       MachineResumeSignals(&mask);
       return VM_STATUS_FAILURE;
@@ -2581,7 +2712,7 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
 
     if (!global_state.fat_fs.init_new_fd(fd))
     {
-      std::cout << "[VMDirectoryOpen] Error: failed to init fd\n";
+      // std::cout << "[VMDirectoryOpen] Error: failed to init fd\n";
       global_state.fat_fs.release_mount_lock(&mask);
       MachineResumeSignals(&mask);
       return VM_STATUS_FAILURE;
@@ -2605,7 +2736,7 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
 
     if (!global_state.fat_fs.delete_fd(dirdescriptor))
     {
-      std::cout << "[VMDirectoryClose] Error: unexpected error on deletion \n";
+      // std::cout << "[VMDirectoryClose] Error: unexpected error on deletion \n";
       global_state.fat_fs.release_mount_lock(&mask);
       MachineResumeSignals(&mask);
       return VM_STATUS_FAILURE;
@@ -2626,7 +2757,7 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
     if (abspath == NULL)
     {
       MachineResumeSignals(&mask);
-      std::cout << "[VMDirectoryCurrent] Error: abspath is NULL\n";
+      // std::cout << "[VMDirectoryCurrent] Error: abspath is NULL\n";
       return VM_STATUS_ERROR_INVALID_PARAMETER;
     }
 
@@ -2644,7 +2775,7 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
 
     if (path == NULL)
     {
-      std::cout << "[VMDirectoryChange] Error: path is NULL\n";
+      // std::cout << "[VMDirectoryChange] Error: path is NULL\n";
       MachineResumeSignals(&mask);
       return VM_STATUS_ERROR_INVALID_PARAMETER;
     }
@@ -2657,10 +2788,10 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
     TVMStatus res = VMFileSystemGetAbsolutePath(newpath, curpath, path);
     if ((res != VM_STATUS_SUCCESS) || (std::string(newpath) != std::string(curpath)))
     {
-      std::cout
-        << "[VMDirectoryChange] Error: not supported path: " << path << "."
-        << "Cur path: " << curpath << "  "
-        << "New path: " << newpath << "  \n";
+      // std::cout
+      //   << "[VMDirectoryChange] Error: not supported path: " << path << "."
+      //   << "Cur path: " << curpath << "  "
+      //   << "New path: " << newpath << "  \n";
 
       MachineResumeSignals(&mask);
       return VM_STATUS_FAILURE;
@@ -2698,7 +2829,7 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
     TVMStatus res = VMFileSystemValidPathName(filename);
     if (res != VM_STATUS_SUCCESS)
     {
-      std::cout << "[VMFileOpen] Error: invalid filename: " << filename << ".\n";
+      // std::cout << "[VMFileOpen] Error: invalid filename: " << filename << ".\n";
 
       MachineResumeSignals(&mask);
       return VM_STATUS_FAILURE;
@@ -2717,11 +2848,11 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
 
     if (res != VM_STATUS_SUCCESS)
     {
-      std::cout
-        << "[VMFileOpen] Error: failed to get system absolute path for '"
-        << filename << "'. "
-        << "Res: " << res << ". "
-        << "Cur path: " << cur_work_dir << " \n";
+      // std::cout
+      //   << "[VMFileOpen] Error: failed to get system absolute path for '"
+      //   << filename << "'. "
+      //   << "Res: " << res << ". "
+      //   << "Cur path: " << cur_work_dir << " \n";
 
       MachineResumeSignals(&mask);
       return VM_STATUS_FAILURE;
@@ -2733,11 +2864,11 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
     res = VMFileSystemDirectoryFromFullPath(open_path, absolute_path);
     if (res != VM_STATUS_SUCCESS)
     {
-      std::cout
-        << "[VMFileOpen] Error: failed to get dir from system absolute path. "
-        << "Filename = '" << filename << " "
-        << "Res = " << res << " "
-        << "Abs path = " << absolute_path << " \n";
+      // std::cout
+      //   << "[VMFileOpen] Error: failed to get dir from system absolute path. "
+      //   << "Filename = '" << filename << " "
+      //   << "Res = " << res << " "
+      //   << "Abs path = " << absolute_path << " \n";
 
       MachineResumeSignals(&mask);
       return VM_STATUS_FAILURE;
@@ -2746,21 +2877,21 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
     res = VMFileSystemFileFromFullPath(open_fname, absolute_path);
     if (res != VM_STATUS_SUCCESS)
     {
-      std::cout
-        << "[VMFileOpen] Error: failed to get fname from system absolute path. "
-        << "Filename = '" << filename << " "
-        << "Res = " << res << " "
-        << "Abs path = " << absolute_path << " \n";
+      // std::cout
+      //   << "[VMFileOpen] Error: failed to get fname from system absolute path. "
+      //   << "Filename = '" << filename << " "
+      //   << "Res = " << res << " "
+      //   << "Abs path = " << absolute_path << " \n";
       MachineResumeSignals(&mask);
       return VM_STATUS_FAILURE;
     }
 
     if ((res != VM_STATUS_SUCCESS) || (std::string(open_path) != std::string(cur_work_dir)))
     {
-      std::cout
-        << "[VMFileOpen] Error: not supported path: " << filename << " "
-        << "Cur path: " << cur_work_dir << "  "
-        << "New path: " << open_path << "  \n";
+      // std::cout
+      //   << "[VMFileOpen] Error: not supported path: " << filename << " "
+      //   << "Cur path: " << cur_work_dir << "  "
+      //   << "New path: " << open_path << "  \n";
         MachineResumeSignals(&mask);
         return VM_STATUS_FAILURE;
     }
@@ -2776,25 +2907,25 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
 
     if (!valid_flags)
     {
-      std::cout
-        << "[VMFileOpen] Error during parsing flags. "
-        << "File name = '" << open_fname << "' "
-        << "Flags:\n" <<
-          "\tcan_read = " << can_read << "\n" <<
-          "\tcan_write = " << can_write << "\n" <<
-          "\tfile_must_already_exist = " << file_must_already_exist << "\n" <<
-          "\tto_clear_file = " << to_clear_file << "\n";
+      // std::cout
+      //   << "[VMFileOpen] Error during parsing flags. "
+      //   << "File name = '" << open_fname << "' "
+      //   << "Flags:\n" <<
+      //     "\tcan_read = " << can_read << "\n" <<
+      //     "\tcan_write = " << can_write << "\n" <<
+      //     "\tfile_must_already_exist = " << file_must_already_exist << "\n" <<
+      //     "\tto_clear_file = " << to_clear_file << "\n";
 
       MachineResumeSignals(&mask);
       return VM_STATUS_FAILURE;
     }
-
-    std::cout << "[VMFileOpen] Flags: " << flags << "\n"
-      "\tcan_read = " << can_read << "\n" <<
-      "\tcan_write = " << can_write << "\n" <<
-      "\tfile_must_already_exist = " << file_must_already_exist << "\n" <<
-      "\tto_clear_file = " << to_clear_file << "\n"
-      "File: " << open_fname << "\n";
+    //
+    // std::cout << "[VMFileOpen] Flags: " << flags << "\n"
+    //   "\tcan_read = " << can_read << "\n" <<
+    //   "\tcan_write = " << can_write << "\n" <<
+    //   "\tfile_must_already_exist = " << file_must_already_exist << "\n" <<
+    //   "\tto_clear_file = " << to_clear_file << "\n"
+    //   "File: " << open_fname << "\n";
 
 
     global_state.fat_fs.acquire_mount_lock(&mask);
@@ -2809,8 +2940,8 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
 
     if (is_error)
     {
-      std::cout
-        << "[VMFileOpen] Error during reading cur dir files. No lock acquired/\n";
+      // std::cout
+      //   << "[VMFileOpen] Error during reading cur dir files. No lock acquired/\n";
 
       global_state.fat_fs.release_mount_lock(&mask);
       MachineResumeSignals(&mask);
@@ -2818,7 +2949,7 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
     }
 
     /*
-    1. file doesn't exist and we don't create -> return VM_STATUS_FAILURE
+    1.
     2. file doesn't exist and we're supposed to create -> CASE_create_new_file_entry
        file exists:
     3. - and need to be cleared -> CASE_clear_file_entry()
@@ -2832,35 +2963,80 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
     - IMPLEMENT CLEARING EXISTING FILES
     */
 
+    // file doesn't exist and we don't create -> return VM_STATUS_FAILURE
     if (!file_already_exists && (file_must_already_exist))
     {
-      std::cout
-        << "[VMFileOpen] Can't open: file'" << short_name << "' doesn't exist. "
-        << "Flags don't specify O_CREAT flag\n";
+      // std::cout
+      //   << "[VMFileOpen] Can't open: file'" << short_name << "' doesn't exist. "
+      //   << "Flags don't specify O_CREAT flag\n";
 
       global_state.fat_fs.release_mount_lock(&mask);
       MachineResumeSignals(&mask);
       return VM_STATUS_FAILURE;
     }
-
-    global_state.fat_fs.acquire_fat_lock(&mask);
-
-    int cluster_number = -1;
-    if (!global_state.fat_fs.allocate_new_cluster(&mask, &cluster_number))
+    // file doesn't exist; creating new on request
+    else if (!file_already_exists && !file_must_already_exist)
     {
-      std::cout
-        << "[VMFileOpen] Failed to allocate a new cluster id in FAT array. "
-        << "Possibly, didn't acquire fat lock?\n";
 
+      global_state.fat_fs.acquire_fat_lock(&mask);
+
+      int cluster_number = -1;
+      if (!global_state.fat_fs.allocate_new_cluster(&mask, &cluster_number))
+      {
+        std::cout
+          << "[VMFileOpen] Failed to allocate a new cluster id in FAT array. "
+          << "Possibly, didn't acquire fat lock?\n";
+
+        global_state.fat_fs.release_fat_lock(&mask);
+        global_state.fat_fs.release_mount_lock(&mask);
+        return VM_STATUS_FAILURE;
+      }
       global_state.fat_fs.release_fat_lock(&mask);
+
+
+      time_t now_date_time = std::time(0);
+      std::tm* cur_date_time = std::localtime(&now_date_time);
+
+      SVMDateTime current;
+      current.DYear = cur_date_time -> tm_year + 1900;
+      current.DMonth = cur_date_time -> tm_mon;
+      current.DHour = cur_date_time -> tm_hour;
+      current.DMinute = cur_date_time -> tm_min;
+      current.DSecond = cur_date_time -> tm_sec;
+      current.DHundredth = 32;
+
+
+      auto entries = global_state.fat_fs.get_root_dir_entries();
+      if (entries == NULL)
+      {
+        std::cout
+          << "[VMFileOpen] Failed to get dir entries . "
+          << "Possibly, didn't acquire mount lock?\n";
+
+        global_state.fat_fs.release_mount_lock(&mask);
+        return VM_STATUS_FAILURE;
+      }
+
+      DirEntry* new_entry = new DirEntry(
+        short_name, cluster_number, 0x00, 0, current, current, current, -1);
+
+      entries -> push_back(new_entry);
+      if (!global_state.fat_fs.store_dir_entry(&mask, new_entry))
+      {
+        std::cout
+          << "[VMFileOpen] Can't permanently save a new file entry. "
+          << "Possibly, didn't acquire mount lock?\n";
+
+        global_state.fat_fs.release_mount_lock(&mask);
+        return VM_STATUS_FAILURE;
+      }
+
       global_state.fat_fs.release_mount_lock(&mask);
-      return VM_STATUS_FAILURE;
     }
-    global_state.fat_fs.release_fat_lock(&mask);
 
-    std::cout << "CLUSTER ID = " << cluster_number << "\n";
 
-    global_state.fat_fs.release_mount_lock(&mask);
+
+
 
     MachineResumeSignals(&mask);
     return VM_STATUS_SUCCESS;
@@ -2895,6 +3071,147 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
     }
 
     std::cout << ">> [VMFileRead] Error. File Descriptor: " << filedescriptor << "\n";
+
+
+
+
+
+
+
+
+
+
+
+
+    // FdDescription *fd_desc = &(global_state.fat_fs.fds[filedescriptor]);
+    // int expected_total_bytes = *length;
+    // int bytes_until_eof =
+    //   fd_desc -> dir_item_ptr -> size - fd_desc -> bytes_processed_total;
+    // if (expected_total_bytes > bytes_until_eof)
+    // {
+    //   expected_total_bytes = bytes_until_eof;
+    // }
+    //
+    // int total_bytes_read_in_this_read_call = 0;
+    // bool is_failure = false;
+    // bool is_last_read = false;
+    //
+    // do
+    // {
+    //   if (expected_total_bytes == 0)
+    //   {
+    //     is_last_read = true;
+    //     break;
+    //   }
+    //
+    //   // Navigation
+    //   // @TODO: handle end of file: 0xffff
+    //   if (fd_desc -> bytes_processed_this_cluster == 1024)
+    //   {
+    //     auto next_cluster_num =
+    //       global_state.fat_fs.fat[fd_desc -> cur_cluster_num];
+    //     // if no next cluster??
+    //
+    //     fd_desc -> bytes_processed_this_cluster = 0;
+    //     fd_desc -> cur_cluster_num = next_cluster_num;
+    //
+    //     auto sector =
+    //       global_state.fat_fs.get_first_sector_of_cluster(next_cluster_num);
+    //
+    //     fd_desc -> mount_vol_offset =
+    //       global_state.fat_fs.get_offset_of_sector(sector);
+    //   }
+    //
+    //   auto cluster_offset = fd_desc -> mount_vol_offset +
+    //     fd_desc -> bytes_processed_this_cluster;
+    //
+    //   // what if it doesn't work?
+    //   // @TODO: to consider
+    //   int new_offset = -1;
+    //   OG_VMFileSeek(
+    //     &mask,
+    //     global_state.fat_fs.mount_fd,
+    //     cluster_offset,
+    //     0,
+    //     &new_offset
+    //   );
+    //   MachineSuspendSignals(&mask);
+    //
+    //   // @TODO ?????
+    //   if (new_offset != cluster_offset)
+    //   {
+    //     std::cout << "[READ] OFFSETS ARE DIFFEREENT: " <<
+    //       new_offset << " " << cluster_offset << "\n";
+    //   }
+    //
+    //
+    //   // @TODO remove 1024
+    //   int cluster_bytes_left = 1024 - fd_desc -> bytes_processed_this_cluster;
+    //   int to_read_bytes = expected_total_bytes - total_bytes_read_in_this_read_call;
+    //
+    //   if (to_read_bytes > cluster_bytes_left)
+    //   {
+    //     to_read_bytes = cluster_bytes_left;
+    //   }
+    //   else
+    //   {
+    //     is_last_read = true;
+    //   }
+    //
+    //   TVMStatus res = OG_VMFileRead(
+    //     &mask,
+    //     global_state.fat_fs.mount_fd,
+    //     data + total_bytes_read_in_this_read_call,
+    //     &to_read_bytes
+    //   );
+    //   MachineSuspendSignals(&mask);
+    //
+    //   if (res != VM_STATUS_SUCCESS)
+    //   {
+    //     is_failure = true;
+    //   }
+    //
+    //   total_bytes_read_in_this_read_call += to_read_bytes;
+    //   fd_desc -> bytes_processed_this_cluster += to_read_bytes;
+    //   fd_desc -> bytes_processed_total += to_read_bytes;
+    //   fd_desc -> mount_vol_offset += to_read_bytes;
+    //
+    // }
+    // while(!is_last_read && !is_failure);
+    //
+    // // @TODO: wrong
+    // *length = total_bytes_read_in_this_read_call;
+    //
+    //
+    // if (is_failure)
+    // {
+    //   MachineResumeSignals(&mask);
+    //   return VM_STATUS_FAILURE;
+    // }
+    //
+    // MachineResumeSignals(&mask);
+    // return VM_STATUS_SUCCESS;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     MachineResumeSignals(&mask);
     return VM_STATUS_FAILURE;
