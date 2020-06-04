@@ -151,7 +151,7 @@ extern "C"
   -- 4 - int32_t
   -- 5 - uint32_t
   */
-  void TO_LITTLE_ENDIAN_INT(uint8_t *byte_buffer, int buffer_len, void *value, uint8_t type)
+  void TO_INT_FROM_LITTLE_ENDIAN_BUFFER(uint8_t *byte_buffer, int buffer_len, void *value, uint8_t type)
   {
     if (type == 0)
     {
@@ -203,7 +203,78 @@ extern "C"
     }
   }
 
+  void TO_LITTLE_ENDIAN_BUFFER_FROM_INT(
+    uint8_t *byte_buffer, int buffer_len, void *ptr_value, uint8_t type)
+  {
+    uint8_t MASK = 0xff;
 
+    if (type == 0)
+    {
+      int8_t value = (int8_t) (*(int8_t*)ptr_value); // 8 bits - 1 byte
+
+      for (int i = 0; i < buffer_len; i++)
+      {
+        uint8_t last_val = value & MASK;
+        value = value >> 8;
+        byte_buffer[i] = last_val;
+      }
+    }
+    else if (type == 1)
+    {
+      uint8_t value = (uint8_t) (*(uint8_t*)ptr_value); // 8 bits - 1 byte
+
+      for (int i = 0; i < buffer_len; i++)
+      {
+        uint8_t last_val = value & MASK;
+        value = value >> 8;
+        byte_buffer[i] = last_val;
+      }
+    }
+    else if (type == 2)
+    {
+      int16_t value = (int16_t) (*(int16_t*)ptr_value); // 16 bits - 2 bytes
+
+      for (int i = 0; i < buffer_len; i++)
+      {
+        uint8_t last_val = value & MASK;
+        value = value >> 8;
+        byte_buffer[i] = last_val;
+      }
+    }
+    else if (type == 3)
+    {
+      uint16_t value = (uint16_t) (*(uint16_t*)ptr_value); // 16 bits - 2 bytes
+
+      for (int i = 0; i < buffer_len; i++)
+      {
+        uint8_t last_val = value & MASK;
+        value = value >> 8;
+        byte_buffer[i] = last_val;
+      }
+    }
+    else if (type == 4)
+    {
+      int32_t value = (int32_t) (*(int32_t*)ptr_value); // 32 bits - 4 bytes
+
+      for (int i = 0; i < buffer_len; i++)
+      {
+        uint8_t last_val = value & MASK;
+        value = value >> 8;
+        byte_buffer[i] = last_val;
+      }
+    }
+    else if (type == 5)
+    {
+      uint32_t value = (uint32_t) (*(uint32_t*)ptr_value); // 32 bits - 4 bytes
+
+      for (int i = 0; i < buffer_len; i++)
+      {
+        uint8_t last_val = value & MASK;
+        value = value >> 8;
+        byte_buffer[i] = last_val;
+      }
+    }
+  }
 
 
   uint16_t DAY_MASK    = 0b0000000000011111;
@@ -530,11 +601,18 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
   {
     std::string short_name;
     uint16_t first_cluster_number;
+    bool file = false;
+    bool read_only = false;
 
     SVMDirectoryEntry internal_entry;
 
   public:
     DirEntry(char* buffer);
+
+    std::string get_short_name() { return short_name; }
+    bool is_file() { return file; };
+    bool is_read_only() { return read_only; }
+
     void get_internal_entry(SVMDirectoryEntryRef ptr)
     {
       *ptr = internal_entry;
@@ -548,9 +626,15 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
     // short name
     VMStringCopy(internal_entry.DShortFileName, short_name.c_str());
     // size
-    TO_LITTLE_ENDIAN_INT((uint8_t*)(buffer + 28), 4, (void*) &internal_entry.DSize, 5);
+    TO_INT_FROM_LITTLE_ENDIAN_BUFFER((uint8_t*)(buffer + 28), 4, (void*) &internal_entry.DSize, 5);
     // attributes
     internal_entry.DAttributes = buffer[11];
+
+    // not a file; not an archive
+    file =
+      ((buffer[11] & VM_FILE_SYSTEM_ATTR_DIRECTORY) == 0) &&
+      ((buffer[11] & VM_FILE_SYSTEM_ATTR_ARCHIVE) == 0);
+    read_only = (buffer[11] & VM_FILE_SYSTEM_ATTR_READ_ONLY) != 0;
 
 
     uint16_t creat_date;
@@ -561,12 +645,12 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
     uint16_t write_date;
     uint16_t write_time;
 
-    TO_LITTLE_ENDIAN_INT((uint8_t*)(buffer + 16), 2, (void*) &creat_date, 3);
-    TO_LITTLE_ENDIAN_INT((uint8_t*)(buffer + 14), 2, (void*) &creat_time, 3);
-    TO_LITTLE_ENDIAN_INT((uint8_t*)(buffer + 13), 1, (void*) &create_time_tenth, 1);
-    TO_LITTLE_ENDIAN_INT((uint8_t*)(buffer + 18), 2, (void*) &access_date, 3);
-    TO_LITTLE_ENDIAN_INT((uint8_t*)(buffer + 24), 2, (void*) &write_date, 3);
-    TO_LITTLE_ENDIAN_INT((uint8_t*)(buffer + 22), 2, (void*) &write_time, 3);
+    TO_INT_FROM_LITTLE_ENDIAN_BUFFER((uint8_t*)(buffer + 16), 2, (void*) &creat_date, 3);
+    TO_INT_FROM_LITTLE_ENDIAN_BUFFER((uint8_t*)(buffer + 14), 2, (void*) &creat_time, 3);
+    TO_INT_FROM_LITTLE_ENDIAN_BUFFER((uint8_t*)(buffer + 13), 1, (void*) &create_time_tenth, 1);
+    TO_INT_FROM_LITTLE_ENDIAN_BUFFER((uint8_t*)(buffer + 18), 2, (void*) &access_date, 3);
+    TO_INT_FROM_LITTLE_ENDIAN_BUFFER((uint8_t*)(buffer + 24), 2, (void*) &write_date, 3);
+    TO_INT_FROM_LITTLE_ENDIAN_BUFFER((uint8_t*)(buffer + 22), 2, (void*) &write_time, 3);
 
     BYTE_TO_DATE_TIME_4(
       &(internal_entry.DCreate), creat_date, creat_time, create_time_tenth);
@@ -574,7 +658,7 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
     BYTE_TO_DATE_TIME_3(&(internal_entry.DModify), write_date, write_time);
 
 
-    TO_LITTLE_ENDIAN_INT(
+    TO_INT_FROM_LITTLE_ENDIAN_BUFFER(
       (uint8_t*)(buffer + 26), 2, (void*) &first_cluster_number, 3);
   }
 
@@ -605,7 +689,7 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
     bool is_fat_lock_free = true;
     TVMThreadID fat_lock_owner_id = 0;
     TVMMutexID fat_lock_id;
-    std::vector<uint32_t> fat_arr;
+    std::vector<uint16_t> fat_arr;
 
     // METADATA
     uint16_t bytes_per_sector;
@@ -641,7 +725,7 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
 
     void acquire_fat_lock(TMachineSignalStateRef mask_ptr);
     void release_fat_lock(TMachineSignalStateRef mask_ptr);
-    std::vector<uint32_t>* get_fat_array();
+    std::vector<uint16_t>* get_fat_array();
 
     void acquire_mount_lock(TMachineSignalStateRef mask_ptr);
     void release_mount_lock(TMachineSignalStateRef mask_ptr);
@@ -655,6 +739,10 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
     bool delete_fd(int fd);
     bool read_fd_dir(int fd, SVMDirectoryEntryRef dir);
     bool rewind_fd_dir(int fd);
+
+    void file_entry_exists(std::string short_name, bool* exists, bool* is_error);
+    bool allocate_new_cluster(TMachineSignalStateRef mask_ptr, int* id);
+    bool store_sectors_into_memory(TMachineSignalStateRef mask_ptr, FdOffset* fd_offset, uint8_t *buffer, int sect_index, int sect_num);
   };
 
 
@@ -934,6 +1022,154 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
 
 
 
+  // @TODO: locks
+  // meta = 0
+  // fat = 1 - 34
+  // root dir = 35-66
+  // data = 67 -> ...
+  // ASSUMPTION: locks are acquired already
+  bool FatFS::store_sectors_into_memory(
+    TMachineSignalStateRef mask_ptr, FdOffset* fd_offset, uint8_t *buffer, int sect_index, int sect_num)
+  {
+    if (fd_offset == NULL)
+    {
+      return false;
+    }
+
+    int buffer_len = bytes_per_sector * sect_num;
+    int expected_offset = sect_index * bytes_per_sector;
+
+    TVMStatus res = OG_VMFileSeek(
+      mask_ptr, fd_offset -> fd,
+      expected_offset, 0, &(fd_offset -> offset)
+    );
+    MachineSuspendSignals(mask_ptr);
+
+    if ((res != VM_STATUS_SUCCESS) || (fd_offset -> offset != expected_offset))
+    {
+      std::cout
+        << "[FatFS] can't store_sectors_into_memory(): "
+        << "failed to seek to proper offset. "
+        << "Status = " << res << ". "
+        << "Expected offset = " << expected_offset << ". "
+        << "Actual offset = " << fd_offset -> offset << ".\n";
+
+      return false;
+    }
+
+    int did_write_bytes = buffer_len;
+    res = OG_VMFileWrite(mask_ptr, fd_offset -> fd, (void*) buffer, &did_write_bytes);
+    MachineSuspendSignals(mask_ptr);
+
+    if (res == VM_STATUS_SUCCESS)
+    {
+      fd_offset -> offset += did_write_bytes;
+    }
+
+    if ((res != VM_STATUS_SUCCESS) || (did_write_bytes != buffer_len))
+    {
+      std::cout
+        << "[FatFS] can't store_sectors_into_memory(): "
+        << "failed to write all data. "
+        << "Status = " << res << ". "
+        << "Expected bytes written = " << buffer_len << ". "
+        << "Actual number = " << did_write_bytes << ".\n";
+
+      return false;
+    }
+
+    return true;
+  }
+
+
+  bool FatFS::allocate_new_cluster(TMachineSignalStateRef mask_ptr, int* id)
+  {
+    if (!is_fat_array_access_allowed())
+    {
+      return false;
+    }
+
+    if (!is_mount_access_allowed())
+    {
+      return false;
+    }
+
+    FdOffset* mount = get_mount_fd_offset();
+    if (mount == NULL)
+    {
+      return false;
+    }
+
+    int free_index = 2;
+    while(fat_arr[free_index] != 0)
+    {
+      free_index += 1;
+    };
+
+    // allocate
+    fat_arr[free_index] = 0xffff;
+
+    int fat_entries_in_sector = bytes_per_sector / 2;
+
+    // 2 bytes per entry
+    // get base offset of the correct sector:
+    int fat_offset = get_offset_of_cluster(0);
+    fat_offset += (2 * free_index);
+    int sector_index = fat_offset / bytes_per_sector;
+
+    uint8_t buffer[bytes_per_sector];
+
+    int start_fat_array_index =
+      (free_index / fat_entries_in_sector) * fat_entries_in_sector;
+
+    for (int i = 0; i < fat_entries_in_sector; i++)
+    {
+      uint16_t fat_arr_val = fat_arr[start_fat_array_index + i];
+      TO_LITTLE_ENDIAN_BUFFER_FROM_INT(buffer + 2*i, 2, (void*) &fat_arr_val, 3);
+    }
+
+
+    // @TODO: allocate a lock to write into sector
+    if (!store_sectors_into_memory(mask_ptr, mount, buffer, sector_index, 1))
+    {
+      return false;
+    }
+
+    *id = free_index;
+    return true;
+  }
+
+
+  void FatFS::file_entry_exists(std::string short_name, bool* exists, bool* is_error)
+  {
+    if (!is_mount_access_allowed())
+    {
+      *is_error = true;
+      return;
+    }
+
+    *exists = false;
+
+    for(auto it = root_dir_entries.begin(); it != root_dir_entries.end(); ++it)
+    {
+      if (((*it) -> get_short_name()) == short_name)
+      {
+        if ((*it) -> is_file())
+        {
+          *exists = true;
+        }
+      }
+
+      if (*exists)
+      {
+         break;
+      }
+    }
+
+    *is_error = false;
+  }
+
+
 
   // +
   bool FatFS::rewind_fd_dir(int fd)
@@ -1106,7 +1342,7 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
 
 
   // +
-  std::vector<uint32_t>* FatFS::get_fat_array()
+  std::vector<uint16_t>* FatFS::get_fat_array()
   {
     if (!is_fat_array_access_allowed())
     {
@@ -1293,18 +1529,18 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
       return false;
     }
 
-    TO_LITTLE_ENDIAN_INT(metadata + 11, 2, (void*) &bytes_per_sector, 3);
-    TO_LITTLE_ENDIAN_INT(metadata + 13, 1, (void*) &sectors_per_cluster, 1);
-    TO_LITTLE_ENDIAN_INT(metadata + 14, 2, (void*) &reserved_sectors_count, 3);
-    TO_LITTLE_ENDIAN_INT(metadata + 16, 1, (void*) &fats_count, 1);
-    TO_LITTLE_ENDIAN_INT(metadata + 17, 2, (void*) &root_entries_count, 3);
+    TO_INT_FROM_LITTLE_ENDIAN_BUFFER(metadata + 11, 2, (void*) &bytes_per_sector, 3);
+    TO_INT_FROM_LITTLE_ENDIAN_BUFFER(metadata + 13, 1, (void*) &sectors_per_cluster, 1);
+    TO_INT_FROM_LITTLE_ENDIAN_BUFFER(metadata + 14, 2, (void*) &reserved_sectors_count, 3);
+    TO_INT_FROM_LITTLE_ENDIAN_BUFFER(metadata + 16, 1, (void*) &fats_count, 1);
+    TO_INT_FROM_LITTLE_ENDIAN_BUFFER(metadata + 17, 2, (void*) &root_entries_count, 3);
 
 
     // TOTAL SECTORS COUNT
     uint16_t total_sec_16;
     uint32_t total_sec_32;
-    TO_LITTLE_ENDIAN_INT(metadata + 19, 2, (void*) &total_sec_16, 3);
-    TO_LITTLE_ENDIAN_INT(metadata + 32, 4, (void*) &total_sec_32, 5);
+    TO_INT_FROM_LITTLE_ENDIAN_BUFFER(metadata + 19, 2, (void*) &total_sec_16, 3);
+    TO_INT_FROM_LITTLE_ENDIAN_BUFFER(metadata + 32, 4, (void*) &total_sec_32, 5);
     if ((total_sec_16 == 0) && (total_sec_32 == 0))
     {
       // VMPrintError(
@@ -1337,9 +1573,9 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
     }
 
     // LEFTOVER VALUES
-    TO_LITTLE_ENDIAN_INT(metadata + 21, 1, (void*) &media_value, 1);
-    TO_LITTLE_ENDIAN_INT(metadata + 22, 2, (void*) &sectors_per_fat, 3);
-    TO_LITTLE_ENDIAN_INT(metadata + 39, 4, (void*) &volume_serial_number, 5);
+    TO_INT_FROM_LITTLE_ENDIAN_BUFFER(metadata + 21, 1, (void*) &media_value, 1);
+    TO_INT_FROM_LITTLE_ENDIAN_BUFFER(metadata + 22, 2, (void*) &sectors_per_fat, 3);
+    TO_INT_FROM_LITTLE_ENDIAN_BUFFER(metadata + 39, 4, (void*) &volume_serial_number, 5);
 
     eof_value = 0xff;
     eof_value = (eof_value << 8) + media_value;
@@ -1349,6 +1585,9 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
 
     root_dir_sectors_count =
       ((root_entries_count * 32) + (bytes_per_sector - 1)) / bytes_per_sector;
+
+    // debug_print_bpb_metadata();
+
     return true;
   }
 
@@ -1416,20 +1655,21 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
     mount -> offset += fat_buffer_len;
 
     // STORE FAT VALUES
-    for (uint32_t i = 0; i < fat_size; i++)
+    for (uint16_t i = 0; i < fat_size; i++)
     {
-      uint32_t fat_val = 0;
-      TO_LITTLE_ENDIAN_INT(fat_buffer + 2 * i, 2, (void*) &fat_val, 5);
+      uint16_t fat_val = 0;
+      TO_INT_FROM_LITTLE_ENDIAN_BUFFER(fat_buffer + 2 * i, 2, (void*) &fat_val, 3);
       (*fat_array)[i] = fat_val;
     }
 
     // assert 0xfff8 0xffff
-    if (((*fat_array)[0] != eof_value) || ((*fat_array)[1] != 65535))
+    if (((*fat_array)[0] != eof_value) || ((*fat_array)[1] != 0xffff))
     {
       std::cout
         << "Improperly formated FAT volume. "
         << "First values in fat table are expected to be "
-        << "0xff<BPB_Media> and 0xffff\n";
+        << "0xff<BPB_Media> and 0xffff. "
+        << "Received: " << (*fat_array)[0] << " " << (*fat_array)[1] << "\n";
 
       return false;
     }
@@ -2560,10 +2800,22 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
     global_state.fat_fs.acquire_mount_lock(&mask);
 
     std::string short_name = LONG_TO_SHORT_NAME(open_fname);
-    std::cout << "SHORT NAME: " << short_name << '\n';
 
-    // bool file_already_exists =
-    //   global_state.fat_fs.file_entry_exists(open_fname);
+
+    bool file_already_exists;
+    bool is_error = false;
+
+    global_state.fat_fs.file_entry_exists(short_name, &file_already_exists, &is_error);
+
+    if (is_error)
+    {
+      std::cout
+        << "[VMFileOpen] Error during reading cur dir files. No lock acquired/\n";
+
+      global_state.fat_fs.release_mount_lock(&mask);
+      MachineResumeSignals(&mask);
+      return VM_STATUS_FAILURE;
+    }
 
     /*
     1. file doesn't exist and we don't create -> return VM_STATUS_FAILURE
@@ -2575,10 +2827,38 @@ bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
 
     SUMMARY:
     - IMPLEMENT CREATION OF FILE ENTRY FD
-    - IMPLEMENT CHECKING IF FILE ALREADY EXISTS IN CWD
-    - IMPLEMENT NEW FILE CREATION
+    - IMPLEMENT CHECKING IF FILE ALREADY EXISTS IN CWD ---------- done
+    - IMPLEMENT NEW FILE CREATION ------------ doing
     - IMPLEMENT CLEARING EXISTING FILES
     */
+
+    if (!file_already_exists && (file_must_already_exist))
+    {
+      std::cout
+        << "[VMFileOpen] Can't open: file'" << short_name << "' doesn't exist. "
+        << "Flags don't specify O_CREAT flag\n";
+
+      global_state.fat_fs.release_mount_lock(&mask);
+      MachineResumeSignals(&mask);
+      return VM_STATUS_FAILURE;
+    }
+
+    global_state.fat_fs.acquire_fat_lock(&mask);
+
+    int cluster_number = -1;
+    if (!global_state.fat_fs.allocate_new_cluster(&mask, &cluster_number))
+    {
+      std::cout
+        << "[VMFileOpen] Failed to allocate a new cluster id in FAT array. "
+        << "Possibly, didn't acquire fat lock?\n";
+
+      global_state.fat_fs.release_fat_lock(&mask);
+      global_state.fat_fs.release_mount_lock(&mask);
+      return VM_STATUS_FAILURE;
+    }
+    global_state.fat_fs.release_fat_lock(&mask);
+
+    std::cout << "CLUSTER ID = " << cluster_number << "\n";
 
     global_state.fat_fs.release_mount_lock(&mask);
 
