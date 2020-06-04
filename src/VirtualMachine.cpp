@@ -99,6 +99,49 @@ extern "C"
   TCB *IDLE_THREAD_PTR = NULL;
 
 
+
+
+  // https://man7.org/linux/man-pages/man2/open.2.html
+  // O_CREAT | O_TRUNC | O_RDWR, 0644,
+  // O_RDONLY, 0644,
+  // must flag must include one of: O_RDONLY, O_WRONLY, or O_RDWR.
+  // Additional:
+  // O_CREAT - If pathname does not exist, create it as a regular file.
+  // O_TRUNC - if pathname exists, is a regular file,
+  //              access mode allows writing (is O_RDWR or O_WRONLY)
+  // it will be truncated to length 0
+  // mode: user, group, others
+  // 400 - read, 200 - write, 100 - execute
+  bool PARSE_FLAGS(
+    int flags, bool *can_read, bool *can_write, bool *must_exist, bool *to_clear)
+  {
+    if ((flags & O_RDWR) == O_RDWR)
+    {
+      *can_read = true;
+      *can_write = true;
+    }
+    else if ((flags & O_WRONLY) == O_WRONLY)
+    {
+      *can_write = true;
+    }
+    else if ((flags & O_RDONLY) == O_RDONLY)
+    {
+      *can_read = true;
+    }
+
+    if ((flags & O_TRUNC) == O_TRUNC)
+    {
+      *to_clear = true;
+    }
+
+    if ((flags & O_CREAT) == O_CREAT)
+    {
+      *must_exist = false;
+    }
+
+    return *can_read || *can_write;
+  }
+
   /*
   - value_types:
   -- 0 - int8_t (1 byte)
@@ -198,7 +241,124 @@ extern "C"
   }
 
 
+
+
+
+// needs to have only legal chars; legal short name
+std::string SHORT_NAME_TO_BUFFER(char* fname)
+{
+  std::cout << "UNEXPECTED TO BE HERE\n";
+}
+
+bool IS_LEGAL_CHAR_IN_LONG_NAME(char& ch)
+{
+  if (ch <= 0x20)
+  {
+    return false;
+  }
+
+  switch (ch)
+  {
+    // illegal values
+    case 0x22:
+    case 0x2A:
+    case 0x2B:
+    case 0x2C:
+    case 0x2E:
+    case 0x2F:
+    case 0x3A:
+    case 0x3B:
+    case 0x3C:
+    case 0x3D:
+    case 0x3E:
+    case 0x3F:
+    case 0x5B:
+    case 0x5C:
+    case 0x5D:
+    case 0x7C:
+      return false;
+    // legals values
+    default:
+      return true;
+  }
+}
+
+  // max length = 12 (8 name, 1 dot, 3 ext)
+  // needs to filter bad chars
+  std::string LONG_TO_SHORT_NAME(char* long_name)
+  {
+    char short_name[13] = {
+      '\0', '\0', '\0', '\0', '\0', '\0',
+      '\0', '\0', '\0', '\0', '\0', '\0', '\0'};
+
+    int short_name_i = 0;
+    int long_name_i = 0;
+    bool is_long_name_extension = false;
+    int short_name_extension_len = -1;
+
+    // handle short_name length
+    while (true)
+    {
+      // reached end of long name
+      if (long_name[long_name_i] == 0x00)
+      {
+        break;
+      }
+
+      if (is_long_name_extension && (short_name_extension_len >= 3))
+      {
+        break;
+      }
+
+      // '.' in long name: if 1st time, add to short name. Otherwise, ignore
+      if (long_name[long_name_i] == '.')
+      {
+        is_long_name_extension = true;
+        long_name_i += 1;
+        continue;
+      }
+
+      // if already got 8 chars in file name and still not in long name extesion
+      if ((!is_long_name_extension) && (short_name_i > 7))
+      {
+        long_name_i += 1;
+        continue;
+      }
+
+
+      // invalid char in long name - ignore
+      if (!IS_LEGAL_CHAR_IN_LONG_NAME(long_name[long_name_i]))
+      {
+        long_name_i += 1;
+        continue;
+      }
+
+      // only valid chars here. no '.'
+      // case 1: long name - actual name
+      // case 2: long name - extension
+
+      if (is_long_name_extension && (short_name_extension_len == -1))
+      {
+        short_name[short_name_i] = '.';
+        short_name_i += 1;
+        short_name_extension_len = 0;
+        continue;
+      }
+
+      short_name[short_name_i] = std::toupper(long_name[long_name_i]);
+      if (is_long_name_extension)
+      {
+        short_name_extension_len += 1;
+      }
+      short_name_i += 1;
+      long_name_i += 1;
+    }
+
+    return std::string(short_name);
+  }
+
   // expects 11 bytes
+  // +
   std::string BUF_TO_SHORT_NAME(char* buf)
   {
     char short_name[13] = {
@@ -349,117 +509,19 @@ extern "C"
 
 
 
-//
-//   // Case 1: we know real FD, FD OFFSET, PATH
-//   // - IF WE MESS UP FD OFFSET, WE WON'T FIND WHERE TO READ.
-//   //    - NEED TO KNOW 1ST CLUSTER
-//   //    - NEED TO HAVE ACCESS TO FAT TABLE IN CASE DIR IS LONG
-//   //    - DON'T KNOW DATE, TIME, or other details
-//   //
-//   // Case 2: we have only 32 bytes of info
-//   // - Need to:
-//   // -
-//
-//   bool Directory::init_root()
-//   {
-//
-//
-//
-//
-//     tmp = -1;
-//     int root_dir_offset = get_offset_of_sector(get_first_sector_of_cluster(1));
-//     res = OG_VMFileSeek(&mask, mount_fd, root_dir_offset, 0, &tmp);
-//     MachineSuspendSignals(&mask);
-//     if (res != VM_STATUS_SUCCESS)
-//     {
-//       MachineResumeSignals(&mask);
-//       return false;
-//     }
-//
-//     int to_read_bytes = bytes_per_sector;
-//     char buf[to_read_bytes];
-//     for (int i = 0; i < to_read_bytes; i++)
-//     {
-//       buf[i] = '\0';
-//     }
-//
-//     bool done = false;
-//     res = VM_STATUS_SUCCESS;
-//     for (int i = 0; !done && (i < root_dir_sectors_count); i++)
-//     {
-//       res = OG_VMFileRead(&mask, mount_fd, buf, &to_read_bytes);
-//       MachineSuspendSignals(&mask);
-//
-//       if (res != VM_STATUS_SUCCESS)
-//       {
-//         break;
-//       }
-//
-//       done = add_files_dirs_to_cur_path(buf, to_read_bytes);
-//     }
-//
-//     if (res != VM_STATUS_SUCCESS)
-//     {
-//       MachineResumeSignals(&mask);
-//       return false;
-//     }
-//
-//     current_dir_cluster_number = 1;
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//     // dir_name           bytes 0 - 11
-//     // attributes         bytes 11              ATTR_DIRECTORY
-//     // ntr                bytes 12
-//     // crttime10          bytes 13
-//     // crt time           bytes 14, 15
-//     // crt date           bytes 16, 17
-//     // last access date   bytes 18, 19
-//     // unused clst num    bytes 20, 21
-//     // write time         bytes 22, 23
-//     // write date         bytes 23, 25
-//     // first cluster #    bytes 26, 27
-//     // file size          bytes 28-31
-//
-//     // ASSUME, we know it's a directory
-//     // - Create lock
-//     // - Parse 32 bytes and store data
-//     //
-//     // -
-//     //
-//     // WHILE parent is locked:
-//     // - Parse values, and store them
-//     // -- directories: "shortname" : <Directory>
-//     // --
-//   }
-//
-// /*
-// Logic:
-// - we have a root dir. It's special
-// - each dir knows it's full path
-// - each dir has all attributes (including short name)
-// - all dirs are stored in global map: <fulpath, Directory*>
-// - each directory has cur_i to display;
-// - each directory has it's own map of next ITEMS: <"shortname", Directory>
-// - each directory knows it's "." directory
-// - each directory knows it's ".." directory (separate values)
-// - For each directory, class attributes from <abspath, Directory*> are used for display
-// -
-// - methods: create_new_directory()
-// - methods: delete_existing_directory()
-// - methods: rewind()?
-// */
-//
-//
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -2230,7 +2292,6 @@ extern "C"
     return VM_STATUS_SUCCESS;
   }
 
-
   // +
   TVMStatus VMDirectoryOpen(const char *dirname, int *dirdescriptor)
   {
@@ -2316,11 +2377,6 @@ extern "C"
     return VM_STATUS_SUCCESS;
   }
 
-
-  //
-  //
-
-
   // +
   TVMStatus VMDirectoryCurrent(char *abspath)
   {
@@ -2387,20 +2443,7 @@ extern "C"
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-  // -
+  // +-
   TVMStatus VMFileOpen(const char *filename, int flags, int mode, int *filedescriptor)
   {
     TMachineSignalState mask;
@@ -2412,134 +2455,134 @@ extern "C"
       return VM_STATUS_ERROR_INVALID_PARAMETER;
     }
 
-    // MachineResumeSignals(&mask);
-    // return VM_STATUS_FAILURE;
+    TVMStatus res = VMFileSystemValidPathName(filename);
+    if (res != VM_STATUS_SUCCESS)
+    {
+      std::cout << "[VMFileOpen] Error: invalid filename: " << filename << ".\n";
 
-    // -----------------------------------------------------------
-    // std::cout << "[VMFileOpen] OG Filename = '" << filename << "'\n";
-    //
-    // TVMStatus res = VMFileSystemValidPathName(filename);
-    // if (res != VM_STATUS_SUCCESS)
-    // {
-    //   MachineResumeSignals(&mask);
-    //   return VM_STATUS_FAILURE;
-    // }
-    //
-    // char absolute_path[128];
-    //
-    // res = VMFileSystemGetAbsolutePath(
-    //   absolute_path,
-    //   // @TODO: implement
-    //   global_state.fat_fs.cur_work_dir_path().c_str(),
-    //   filename
-    // );
-    //
-    // if (res != VM_STATUS_SUCCESS)
-    // {
-    //   MachineResumeSignals(&mask);
-    //   return VM_STATUS_FAILURE;
-    // }
-    //
-    // char cur_fname[128];
-    // char cur_path[128];
-    //
-    // res = VMFileSystemDirectoryFromFullPath(cur_path, absolute_path);
-    // if (res != VM_STATUS_SUCCESS)
-    // {
-    //   MachineResumeSignals(&mask);
-    //   return VM_STATUS_FAILURE;
-    // }
-    //
-    // res = VMFileSystemFileFromFullPath(cur_fname, absolute_path);
-    // if (res != VM_STATUS_SUCCESS)
-    // {
-    //   MachineResumeSignals(&mask);
-    //   return VM_STATUS_FAILURE;
-    // }
-    //
-    //
-    // std::cout << "[VMFileOpen] fname = '" << cur_fname << "' path = '" << cur_path << "'\n";
-    // // @TODO: implement
-    // Directory *cur_dir = global_state.fat_fs.get_directory(cur_path);
-    //
-    // if (cur_dir == NULL)
-    // {
-    //   std::cout << "[VMFileOpen] Failed to navigate to path\n";
-    //   MachineResumeSignals(&mask);
-    //   return VM_STATUS_FAILURE;
-    // }
-    //
-    //
-    // // @TODO: implement; check if if will always be present
-    // TVMMutexIDRef cur_dir_lock_id = cur_dir -> get_lock_id();
-    // OG_VMMutexAcquire(&mask, *cur_dir_lock_id, VM_TIMEOUT_INFINITE);
-    // MachineSuspendSignals(&mask);
-    //
-    // // https://man7.org/linux/man-pages/man2/open.2.html
-    // // O_CREAT | O_TRUNC | O_RDWR, 0644,
-    // // O_RDONLY, 0644,
-    // // must flag must include one of: O_RDONLY, O_WRONLY, or O_RDWR.
-    // // Additional:
-    // // O_CREAT - If pathname does not exist, create it as a regular file.
-    // // O_TRUNC - if pathname exists, is a regular file, access mode allows writing (is O_RDWR or O_WRONLY)
-    // // it will be truncated to length 0
-    // // mode: user, group, others
-    // // 400 - read, 200 - write, 100 - execute
-    //
-    //
-    // std::cout << "[VmFileOpen] Processing Flags '" << flags << "' and Mode: '" << mode << "'\n";
-    //
-    // bool can_read = false;
-    // bool can_write = false;
-    // bool file_must_already_exist = true;
-    // bool to_clear_file = false;
-    //
-    // if ((flags & O_RDWR) == O_RDWR)
-    // {
-    //   std::cout << "can read and write\n";
-    //   can_read = true;
-    //   can_write = true;
-    // }
-    // else if ((flags & O_WRONLY) == O_WRONLY)
-    // {
-    //   std::cout << "write only\n";
-    //   can_write = true;
-    // }
-    // else if ((flags & O_RDONLY) == O_RDONLY)
-    // {
-    //   std::cout << "read only\n";
-    //   can_read = true;
-    // }
-    //
-    // if (!can_read && !can_write)
-    // {
-    //   std::cout << "[VMFileOpen] Invalid flags passed '" << flags << "'\n";
-    //   OG_VMMutexRelease(&mask, *cur_dir_lock_id);
-    //   return VM_STATUS_FAILURE;
-    // }
-    //
-    // if ((flags & O_TRUNC) == O_TRUNC)
-    // {
-    //   to_clear_file = true;
-    // }
-    //
-    // if ((flags & O_CREAT) == O_CREAT)
-    // {
-    //   file_must_already_exist = false;
-    // }
-    //
-    // std::cout << "[VMFileOpen] Flags:\n" <<
-    //   "can_read = " << can_read << "\n" <<
-    //   "can_write = " << can_write << "\n" <<
-    //   "file_must_already_exist = " << file_must_already_exist << "\n" <<
-    //   "to_clear_file = " << to_clear_file << "\n";
-    //
-    //
-    //
-    //
-    //
-    //
-    // OG_VMMutexRelease(&mask, *cur_dir_lock_id);
+      MachineResumeSignals(&mask);
+      return VM_STATUS_FAILURE;
+    }
+
+    char absolute_path[128];
+    char cur_work_dir[128];
+    global_state.fat_fs.get_current_working_directory(cur_work_dir);
+
+    // @TODO: /one/../tmp.txt
+    res = VMFileSystemGetAbsolutePath(
+      absolute_path,
+      cur_work_dir,
+      filename
+    );
+
+    if (res != VM_STATUS_SUCCESS)
+    {
+      std::cout
+        << "[VMFileOpen] Error: failed to get system absolute path for '"
+        << filename << "'. "
+        << "Res: " << res << ". "
+        << "Cur path: " << cur_work_dir << " \n";
+
+      MachineResumeSignals(&mask);
+      return VM_STATUS_FAILURE;
+    }
+
+    char open_fname[128];
+    char open_path[128];
+
+    res = VMFileSystemDirectoryFromFullPath(open_path, absolute_path);
+    if (res != VM_STATUS_SUCCESS)
+    {
+      std::cout
+        << "[VMFileOpen] Error: failed to get dir from system absolute path. "
+        << "Filename = '" << filename << " "
+        << "Res = " << res << " "
+        << "Abs path = " << absolute_path << " \n";
+
+      MachineResumeSignals(&mask);
+      return VM_STATUS_FAILURE;
+    }
+
+    res = VMFileSystemFileFromFullPath(open_fname, absolute_path);
+    if (res != VM_STATUS_SUCCESS)
+    {
+      std::cout
+        << "[VMFileOpen] Error: failed to get fname from system absolute path. "
+        << "Filename = '" << filename << " "
+        << "Res = " << res << " "
+        << "Abs path = " << absolute_path << " \n";
+      MachineResumeSignals(&mask);
+      return VM_STATUS_FAILURE;
+    }
+
+    if ((res != VM_STATUS_SUCCESS) || (std::string(open_path) != std::string(cur_work_dir)))
+    {
+      std::cout
+        << "[VMFileOpen] Error: not supported path: " << filename << " "
+        << "Cur path: " << cur_work_dir << "  "
+        << "New path: " << open_path << "  \n";
+        MachineResumeSignals(&mask);
+        return VM_STATUS_FAILURE;
+    }
+
+
+    bool can_read = false;
+    bool can_write = false;
+    bool file_must_already_exist = true;
+    bool to_clear_file = false;
+
+    bool valid_flags = PARSE_FLAGS(
+      flags, &can_read, &can_write, &file_must_already_exist, &to_clear_file);
+
+    if (!valid_flags)
+    {
+      std::cout
+        << "[VMFileOpen] Error during parsing flags. "
+        << "File name = '" << open_fname << "' "
+        << "Flags:\n" <<
+          "\tcan_read = " << can_read << "\n" <<
+          "\tcan_write = " << can_write << "\n" <<
+          "\tfile_must_already_exist = " << file_must_already_exist << "\n" <<
+          "\tto_clear_file = " << to_clear_file << "\n";
+
+      MachineResumeSignals(&mask);
+      return VM_STATUS_FAILURE;
+    }
+
+    std::cout << "[VMFileOpen] Flags: " << flags << "\n"
+      "\tcan_read = " << can_read << "\n" <<
+      "\tcan_write = " << can_write << "\n" <<
+      "\tfile_must_already_exist = " << file_must_already_exist << "\n" <<
+      "\tto_clear_file = " << to_clear_file << "\n"
+      "File: " << open_fname << "\n";
+
+
+    global_state.fat_fs.acquire_mount_lock(&mask);
+
+    std::string short_name = LONG_TO_SHORT_NAME(open_fname);
+    std::cout << "SHORT NAME: " << short_name << '\n';
+
+    // bool file_already_exists =
+    //   global_state.fat_fs.file_entry_exists(open_fname);
+
+    /*
+    1. file doesn't exist and we don't create -> return VM_STATUS_FAILURE
+    2. file doesn't exist and we're supposed to create -> CASE_create_new_file_entry
+       file exists:
+    3. - and need to be cleared -> CASE_clear_file_entry()
+    4.
+    5. init file entry fd & store flag values (read/write)
+
+    SUMMARY:
+    - IMPLEMENT CREATION OF FILE ENTRY FD
+    - IMPLEMENT CHECKING IF FILE ALREADY EXISTS IN CWD
+    - IMPLEMENT NEW FILE CREATION
+    - IMPLEMENT CLEARING EXISTING FILES
+    */
+
+    global_state.fat_fs.release_mount_lock(&mask);
+
+    MachineResumeSignals(&mask);
     return VM_STATUS_SUCCESS;
   }
 
